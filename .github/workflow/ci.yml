@@ -1,7 +1,7 @@
 name: CI
 
 on:
-  push: [main]  
+  push: [main]
   pull_request: [main]
 
 jobs:
@@ -30,4 +30,4 @@ jobs:
       - name: Build and Test
         run: |
           go build ./...
-          go test ./...   
+          go test ./...

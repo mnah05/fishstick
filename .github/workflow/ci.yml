@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push: [main]  
+  pull_request: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Set up Go
+        uses: actions/setup-go@v2
+        with:
+          go-version: 1.23.x
+      - name: Lint
+        run: |
+          go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.54.2
+          golangci-lint run
+      - name: Test
+        run: |
+          go test ./...
+      - name: Build
+        run: |
+          go build ./...
+      - name: Build and Test
+        run: |
+          go build ./...
+          go test ./...
+      - name: Build and Test
+        run: |
+          go build ./...
+          go test ./...   

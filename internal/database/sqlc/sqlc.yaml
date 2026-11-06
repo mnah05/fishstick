@@ -1,0 +1,18 @@
+version: "2"
+sql:
+  - engine: "postgresql"
+    schema: "../init.sql"
+    queries: "queries"
+    gen:
+      go:
+        package: "sqlc"
+        out: "."
+        sql_package: "database/sql"
+        emit_interface: false
+        emit_empty_slices: true
+        overrides:
+          - db_type: "jsonb"
+            nullable: true
+            go_type:
+              import: "database/sql"
+              type: "Null[[]byte]"

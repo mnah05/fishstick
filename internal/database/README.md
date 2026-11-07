@@ -15,7 +15,7 @@ go run ./cmd/migrate
 go run ./cmd/seed
 ```
 
-Migration files: `internal/database/migrations/` (tool: [goose](https://github.com/pressly/goose)).
+Migration files: `internal/database/migrations/` (tool: [goose](https://github.com/pressly/goose)). sqlc reads the same migration files, so the schema has one source of truth.
 
 ```sh
 go run ./cmd/migrate status   # view applied version
@@ -37,9 +37,9 @@ go run ./cmd/seed
 | Step | Command | What it does |
 |------|---------|----------------|
 | Migrations | `go run ./cmd/migrate` | Creates tables, indexes, triggers (`goose_db_version`) |
-| Seed | `go run ./cmd/seed` | Truncates all four application tables and loads `internal/database/seed.sql` demo rows |
+| Seed | `go run ./cmd/seed` | Truncates the job tables (`TRUNCATE jobs CASCADE`) and loads `internal/database/seed.sql` demo rows |
 
-`init.sql` is kept for **sqlc** schema reference only; do not apply it manually if you use migrations.
+sqlc and the integration tests both use the migration files; do not maintain a separate schema snapshot.
 
 ## Seed UUIDs
 
@@ -64,7 +64,7 @@ go test ./test/database ./test/api -count=1
 
 Use a PostgreSQL URL pointing at a development/test database. The database
 connectivity test performs only `SELECT 1`. Each API integration test
-creates a unique schema, loads `init.sql` into it, and drops that schema when
+creates a unique schema, applies the embedded goose migrations to it, and drops that schema when
 finished. Its database role needs permission to create schemas, tables,
 functions, and triggers. The tests verify trigger idempotency and rollback, listing jobs without runs,
 pagination, update busy states (including lease-aware `RUNNING` / `CANCEL_REQUESTED`)

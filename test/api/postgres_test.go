@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fishstick/internal/database"
 	"github.com/google/uuid"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -55,11 +56,7 @@ func newIntegrationDB(t *testing.T) *sql.DB {
 			t.Error(err)
 		}
 	})
-	ddl, err := os.ReadFile("../../internal/database/init.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(string(ddl)); err != nil {
+	if err := database.RunMigrations(db, "up"); err != nil {
 		t.Fatal(err)
 	}
 	return db

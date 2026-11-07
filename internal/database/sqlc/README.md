@@ -1,9 +1,8 @@
 # Database queries
 
-SQL sources live in `queries/`. SQLC reads `../init.sql` as its schema snapshot;
-`../migrations/` is the source of truth for database changes. Apply migrations
-with `go run ./cmd/migrate`, not by running `init.sql` manually. Keep the snapshot
-in sync when adding migrations. SQLC generation does not change the database.
+SQL sources live in `queries/`. SQLC reads `../migrations/` as its schema;
+those migration files are the source of truth for database changes. Apply them
+with `go run ./cmd/migrate`. SQLC generation does not change the database.
 
 ## Generate Go code
 

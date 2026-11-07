@@ -2,7 +2,7 @@
 -- Truncates job-related tables, then inserts fixed UUID fixtures for local API tests.
 BEGIN;
 
-TRUNCATE dead_letter_jobs, outbox_events, job_runs, jobs RESTART IDENTITY CASCADE;
+TRUNCATE jobs CASCADE;
 
 INSERT INTO jobs (
     id,

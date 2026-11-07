@@ -106,9 +106,9 @@ The handler uses a transaction, locks the run with `SELECT ... FOR UPDATE`, then
 | `RUNNING` | Set `CANCEL_REQUESTED`, `cancel_requested_at`, optional `cancel_reason` (worker should observe and finish) | `202` |
 | `CANCEL_REQUESTED` | No row change (idempotent) | `200` |
 | `SUCCEEDED`, `FAILED`, `CANCELLED` | Refuse | `409` with code `RUN_ALREADY_TERMINAL` |
-| Other (e.g. races after concurrent transitions) | Refuse | `409` with code `RUN_NOT_CANCELLABLE` or `RUN_ALREADY_TERMINAL` after reload |
+| Any other status | Refuse | `409` with code `RUN_NOT_CANCELLABLE` |
 
-If a concurrent transition finishes the run between lock and update, the handler reloads and returns `409 RUN_ALREADY_TERMINAL` when appropriate.
+The run row is locked with `FOR UPDATE` before the status switch, so the conditional update always sees the same status the switch did.
 
 **Planned later (not implemented):** DLQ list/get — see [future-endpoints.md](../docs/future-endpoints.md).
 

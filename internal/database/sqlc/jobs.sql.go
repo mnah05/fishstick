@@ -9,12 +9,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"time"
 
 	"github.com/google/uuid"
 )
 
-const createJob = `-- name: CreateJob :exec
+const createJob = `-- name: CreateJob :one
 INSERT INTO jobs (
     id,
     name,
@@ -29,12 +28,11 @@ INSERT INTO jobs (
     retry_delay_seconds,
     timeout_seconds,
     create_idempotency_key,
-    create_request_hash,
-    created_at,
-    updated_at
+    create_request_hash
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
 )
+RETURNING id, name, event_type, payload, schedule_type, scheduled_at, cron_expression, timezone, next_run_at, max_attempts, retry_delay_seconds, timeout_seconds, create_idempotency_key, create_request_hash, created_at, updated_at
 `
 
 type CreateJobParams struct {
@@ -52,12 +50,10 @@ type CreateJobParams struct {
 	TimeoutSeconds       int32
 	CreateIdempotencyKey sql.NullString
 	CreateRequestHash    sql.NullString
-	CreatedAt            time.Time
-	UpdatedAt            time.Time
 }
 
-func (q *Queries) CreateJob(ctx context.Context, arg CreateJobParams) error {
-	_, err := q.db.ExecContext(ctx, createJob,
+func (q *Queries) CreateJob(ctx context.Context, arg CreateJobParams) (Job, error) {
+	row := q.db.QueryRowContext(ctx, createJob,
 		arg.ID,
 		arg.Name,
 		arg.EventType,
@@ -72,10 +68,27 @@ func (q *Queries) CreateJob(ctx context.Context, arg CreateJobParams) error {
 		arg.TimeoutSeconds,
 		arg.CreateIdempotencyKey,
 		arg.CreateRequestHash,
-		arg.CreatedAt,
-		arg.UpdatedAt,
 	)
-	return err
+	var i Job
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.EventType,
+		&i.Payload,
+		&i.ScheduleType,
+		&i.ScheduledAt,
+		&i.CronExpression,
+		&i.Timezone,
+		&i.NextRunAt,
+		&i.MaxAttempts,
+		&i.RetryDelaySeconds,
+		&i.TimeoutSeconds,
+		&i.CreateIdempotencyKey,
+		&i.CreateRequestHash,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const getJobForUpdate = `-- name: GetJobForUpdate :one
@@ -106,7 +119,7 @@ func (q *Queries) GetJobForUpdate(ctx context.Context, id uuid.UUID) (Job, error
 	return i, err
 }
 
-const updateJob = `-- name: UpdateJob :execrows
+const updateJob = `-- name: UpdateJob :exec
 UPDATE jobs
 SET
     name = $2,
@@ -119,8 +132,7 @@ SET
     next_run_at = $9,
     max_attempts = $10,
     retry_delay_seconds = $11,
-    timeout_seconds = $12,
-    updated_at = $13
+    timeout_seconds = $12
 WHERE id = $1
 `
 
@@ -137,11 +149,10 @@ type UpdateJobParams struct {
 	MaxAttempts       int32
 	RetryDelaySeconds int32
 	TimeoutSeconds    int32
-	UpdatedAt         time.Time
 }
 
-func (q *Queries) UpdateJob(ctx context.Context, arg UpdateJobParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, updateJob,
+func (q *Queries) UpdateJob(ctx context.Context, arg UpdateJobParams) error {
+	_, err := q.db.ExecContext(ctx, updateJob,
 		arg.ID,
 		arg.Name,
 		arg.EventType,
@@ -154,10 +165,6 @@ func (q *Queries) UpdateJob(ctx context.Context, arg UpdateJobParams) (int64, er
 		arg.MaxAttempts,
 		arg.RetryDelaySeconds,
 		arg.TimeoutSeconds,
-		arg.UpdatedAt,
 	)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
+	return err
 }

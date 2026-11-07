@@ -2,14 +2,14 @@
 package main
 
 import (
-	"database/sql"
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 
+	"github.com/fishstick/internal/config"
 	"github.com/fishstick/internal/database"
-	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 func main() {
@@ -24,14 +24,13 @@ func main() {
 		command = flag.Arg(0)
 	}
 
-	databaseURL := os.Getenv("DATABASE_URL")
-	if databaseURL == "" {
-		log.Fatal("DATABASE_URL is required")
-	}
-
-	db, err := sql.Open("pgx", databaseURL)
+	cfg, err := config.NewConfig()
 	if err != nil {
-		log.Fatalf("open database: %v", err)
+		log.Fatal(err)
+	}
+	db, err := database.NewPostgres(context.Background(), cfg)
+	if err != nil {
+		log.Fatal(err)
 	}
 	defer db.Close()
 

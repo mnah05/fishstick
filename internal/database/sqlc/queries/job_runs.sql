@@ -71,8 +71,7 @@ SET
     status = 'RUNNING',
     started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
     lease_expires_at = $3,
-    worker_id = $4,
-    updated_at = CURRENT_TIMESTAMP
+    worker_id = $4
 WHERE id = $1
   AND job_id = $2
   AND status IN ('QUEUED', 'SCHEDULED', 'RETRY_WAIT')
@@ -81,28 +80,16 @@ RETURNING *;
 -- name: GetJobRunByIDForUpdate :one
 SELECT * FROM job_runs WHERE id = $1 FOR UPDATE;
 
--- name: CancelRunImmediate :one
--- Pre-running: mark fully cancelled in one step.
+-- name: CancelRun :one
+-- Pre-running rows become CANCELLED; RUNNING rows become CANCEL_REQUESTED for the
+-- worker to finish. The status set is the single source of truth for cancellable states.
 UPDATE job_runs
 SET
-    status = 'CANCELLED',
+    status = CASE WHEN status = 'RUNNING' THEN 'CANCEL_REQUESTED' ELSE 'CANCELLED' END,
     cancel_requested_at = $2,
-    cancelled_at = $2,
-    cancel_reason = COALESCE(sqlc.narg('cancel_reason')::text, cancel_reason),
-    updated_at = CURRENT_TIMESTAMP
+    cancelled_at = CASE WHEN status = 'RUNNING' THEN NULL ELSE $2 END,
+    cancel_reason = COALESCE(sqlc.narg('cancel_reason')::text, cancel_reason)
 WHERE id = $1
-  AND status IN ('QUEUED', 'SCHEDULED', 'RETRY_WAIT')
-RETURNING *;
-
--- name: RequestRunCancellation :one
--- Running: record request; worker completes transition to CANCELLED.
-UPDATE job_runs
-SET
-    status = 'CANCEL_REQUESTED',
-    cancel_requested_at = COALESCE(cancel_requested_at, $2),
-    cancel_reason = COALESCE(sqlc.narg('cancel_reason')::text, cancel_reason),
-    updated_at = CURRENT_TIMESTAMP
-WHERE id = $1
-  AND status = 'RUNNING'
+  AND status IN ('QUEUED', 'SCHEDULED', 'RETRY_WAIT', 'RUNNING')
 RETURNING *;
 

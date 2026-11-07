@@ -1,9 +1,10 @@
-// Job HTTP handlers, request/response DTOs, scheduling, and mapping for /v1 job routes.
+// Job HTTP handlers, request/response DTOs, and mapping for /v1 job routes.
 //
 // Flow at a glance:
-//   - Handlers (createJob, updateJob, listJobs, getJob) decode HTTP, call *sqlc.Queries, write JSON.
-//   - ValidateScheduleFields + computeNextRunAt keep schedule rules and next_run_at in sync with the DB.
-//   - buildCreateJobParams / MergeJobUpdate turn API bodies into sqlc rows; jobToResponse maps rows back for JSON.
+//   - Handlers decode HTTP, call sqlc queries through server, and write JSON.
+//   - Schedule owns validation and next_run_at computation for create and update.
+//   - buildCreateJobParams / MergeJobUpdate turn API bodies into sqlc rows;
+//     jobToResponse maps rows back for JSON.
 package api
 
 import (
@@ -19,20 +20,15 @@ import (
 	"github.com/fishstick/internal/database/sqlc"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
-	"github.com/robfig/cron/v3"
 )
 
 const (
-	defaultListLimit               = int32(50)
-	maxListLimit                   = int32(100)
+	defaultListLimit = int32(50)
+	maxListLimit     = int32(100)
+
 	defaultMaxAttempts       int32 = 3
 	defaultRetryDelaySeconds int32 = 30
 	defaultTimeoutSeconds    int32 = 120
-
-	ScheduleManual  = "MANUAL"
-	ScheduleOnce    = "ONCE"
-	ScheduleCron    = "CRON"
-	DefaultTimezone = "UTC"
 )
 
 // --- Request DTOs (JSON in) ---------------------------------------------------
@@ -43,7 +39,7 @@ type CreateJobRequest struct {
 	Name              string          `json:"name" validate:"required,notblank"`
 	EventType         string          `json:"event_type" validate:"required,notblank"`
 	Payload           json.RawMessage `json:"payload"`
-	ScheduleType      string          `json:"schedule_type" validate:"required,oneof=MANUAL ONCE CRON"`
+	ScheduleType      string          `json:"schedule_type" validate:"required"`
 	ScheduledAt       *time.Time      `json:"scheduled_at,omitempty"`
 	CronExpression    *string         `json:"cron_expression,omitempty"`
 	Timezone          string          `json:"timezone,omitempty"`
@@ -58,7 +54,7 @@ type UpdateJobRequest struct {
 	Name              *string         `json:"name,omitempty" validate:"omitempty,notblank"`
 	EventType         *string         `json:"event_type,omitempty" validate:"omitempty,notblank"`
 	Payload           json.RawMessage `json:"payload,omitempty"`
-	ScheduleType      *string         `json:"schedule_type,omitempty" validate:"omitempty,oneof=MANUAL ONCE CRON"`
+	ScheduleType      *string         `json:"schedule_type,omitempty"`
 	ScheduledAt       OptionalTime    `json:"scheduled_at"`
 	CronExpression    *string         `json:"cron_expression,omitempty"`
 	Timezone          *string         `json:"timezone,omitempty"`
@@ -124,347 +120,193 @@ type ListJobsResponse struct {
 	NextCursor *string       `json:"next_cursor,omitempty"`
 }
 
-// ScheduleFields is a shared view of schedule-related inputs used by both
-// ValidateScheduleFields and computeNextRunAt so create and update share one rule set.
-type ScheduleFields struct {
-	ScheduleType   string
-	ScheduledAt    *time.Time
-	CronExpression *string
-	Timezone       string
-	NextRunAt      *time.Time
-}
-
-// ScheduleFieldsFromCreate maps a create request into ScheduleFields for validation and next_run_at.
-func ScheduleFieldsFromCreate(req CreateJobRequest) ScheduleFields {
-	return ScheduleFields{
-		ScheduleType:   req.ScheduleType,
-		ScheduledAt:    req.ScheduledAt,
-		CronExpression: req.CronExpression,
-		Timezone:       req.Timezone,
-	}
-}
-
-// ValidateScheduleFields enforces cross-field rules the JSON schema cannot express
-// (for example CRON requires cron_expression but must not include scheduled_at).
-func ValidateScheduleFields(s ScheduleFields) error {
-	tz := strings.TrimSpace(s.Timezone)
-	if tz == "" {
-		tz = DefaultTimezone
-	}
-	if _, err := time.LoadLocation(tz); err != nil {
-		return fmt.Errorf("timezone must be a valid IANA location (default %s)", DefaultTimezone)
-	}
-
-	switch s.ScheduleType {
-	case ScheduleManual:
-		if s.ScheduledAt != nil {
-			return fmt.Errorf("scheduled_at must be omitted when schedule_type is MANUAL")
-		}
-		if s.CronExpression != nil && strings.TrimSpace(*s.CronExpression) != "" {
-			return fmt.Errorf("cron_expression must be omitted when schedule_type is MANUAL")
-		}
-		if s.NextRunAt != nil {
-			return fmt.Errorf("next_run_at must be omitted when schedule_type is MANUAL")
-		}
-	case ScheduleOnce:
-		if s.ScheduledAt == nil {
-			return fmt.Errorf("scheduled_at is required when schedule_type is ONCE")
-		}
-		if s.CronExpression != nil && strings.TrimSpace(*s.CronExpression) != "" {
-			return fmt.Errorf("cron_expression must be omitted when schedule_type is ONCE")
-		}
-		if s.ScheduledAt.Before(time.Now()) {
-			return fmt.Errorf("scheduled_at must be in the future for ONCE jobs")
-		}
-	case ScheduleCron:
-		if s.ScheduledAt != nil {
-			return fmt.Errorf("scheduled_at must be omitted when schedule_type is CRON")
-		}
-		if s.CronExpression == nil || strings.TrimSpace(*s.CronExpression) == "" {
-			return fmt.Errorf("cron_expression is required when schedule_type is CRON")
-		}
-		parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
-		if _, err := parser.Parse(*s.CronExpression); err != nil {
-			return fmt.Errorf("invalid cron_expression")
-		}
-	default:
-		return fmt.Errorf("schedule_type must be MANUAL, ONCE, or CRON")
-	}
-	return nil
-}
-
-// TimezoneOrDefault stores a non-empty IANA zone on the job row; empty client input becomes UTC.
-func TimezoneOrDefault(tz string) string {
-	tz = strings.TrimSpace(tz)
-	if tz == "" {
-		return DefaultTimezone
-	}
-	return tz
-}
-
-// computeNextRunAt derives jobs.next_run_at for the scheduler worker: NULL for MANUAL,
-// scheduled_at for ONCE, and the next cron tick (in job timezone, stored UTC) for CRON.
-func computeNextRunAt(spec ScheduleFields, now time.Time) (sql.NullTime, error) {
-	switch spec.ScheduleType {
-	case ScheduleManual:
-		return sql.NullTime{}, nil
-	case ScheduleOnce:
-		if spec.ScheduledAt == nil {
-			return sql.NullTime{}, fmt.Errorf("scheduled_at is required when schedule_type is ONCE")
-		}
-		return sql.NullTime{Time: *spec.ScheduledAt, Valid: true}, nil
-	case ScheduleCron:
-		if spec.CronExpression == nil || strings.TrimSpace(*spec.CronExpression) == "" {
-			return sql.NullTime{}, fmt.Errorf("cron_expression is required when schedule_type is CRON")
-		}
-		loc, err := time.LoadLocation(TimezoneOrDefault(spec.Timezone))
-		if err != nil {
-			return sql.NullTime{}, fmt.Errorf("timezone must be a valid IANA location")
-		}
-		parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
-		sched, err := parser.Parse(*spec.CronExpression)
-		if err != nil {
-			return sql.NullTime{}, fmt.Errorf("invalid cron_expression")
-		}
-		next := sched.Next(now.In(loc))
-		return sql.NullTime{Time: next.UTC(), Valid: true}, nil
-	default:
-		return sql.NullTime{}, fmt.Errorf("schedule_type must be MANUAL, ONCE, or CRON")
-	}
-}
-
-// int32OrDefault applies server defaults for retry/timeout fields when the client omits them.
-func int32OrDefault(value *int32, defaultValue int32) int32 {
-	if value == nil {
-		return defaultValue
-	}
-	return *value
-}
-
 // createJob handles POST /v1/job/create.
 // Order: decode -> struct validation -> schedule rules -> idempotency replay -> insert -> respond.
-func createJob(queries *sqlc.Queries) echo.HandlerFunc {
-	return func(c echo.Context) error {
-		var req CreateJobRequest
-		if err := c.Bind(&req); err != nil {
-			return writeAPIError(c, http.StatusBadRequest, "VALIDATION_ERROR", "request body must be valid JSON", nil)
-		}
-		if err := c.Validate(&req); err != nil {
-			return writeValidationError(c, err)
-		}
-		req.Name = strings.TrimSpace(req.Name)
-		req.EventType = strings.TrimSpace(req.EventType)
-		if err := ValidateScheduleFields(ScheduleFieldsFromCreate(req)); err != nil {
-			return writeAPIError(c, http.StatusBadRequest, "VALIDATION_ERROR", err.Error(), nil)
-		}
+func (s *server) createJob(c echo.Context) error {
+	var req CreateJobRequest
+	if err := c.Bind(&req); err != nil {
+		return writeAPIError(c, http.StatusBadRequest, "VALIDATION_ERROR", "request body must be valid JSON", nil)
+	}
+	if err := c.Validate(&req); err != nil {
+		return writeValidationError(c, err)
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	req.EventType = strings.TrimSpace(req.EventType)
 
-		hash, err := requestHashSHA256(req)
+	nextRun, err := ScheduleFromCreate(req).NextRun(time.Now().UTC())
+	if err != nil {
+		return writeAPIError(c, http.StatusBadRequest, "VALIDATION_ERROR", err.Error(), nil)
+	}
+	payload, err := normalizePayload(req.Payload)
+	if err != nil {
+		return writeAPIError(c, http.StatusBadRequest, "VALIDATION_ERROR", err.Error(), nil)
+	}
+
+	key, hasKey := idempotencyKeyFromHeader(c.Request())
+	var hash string
+	if hasKey {
+		hash, err = requestHashSHA256(req)
 		if err != nil {
 			return writeAPIError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to hash request", nil)
 		}
-
-		ctx := c.Request().Context()
-		key, hasKey := idempotencyKeyFromHeader(c.Request())
-		if hasKey {
-			if job, ok, replayErr := replayCreateJobIfExists(ctx, queries, key, hash); replayErr != nil {
-				return writeAPIError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to lookup idempotency key", nil)
-			} else if ok {
-				if job == nil {
-					return writeAPIError(c, http.StatusConflict, "IDEMPOTENCY_KEY_REUSED", "idempotency key was already used with a different request body", nil)
-				}
-				return writeJSON(c, http.StatusOK, jobToResponse(*job))
-			}
+		if responded, err := s.replayCreatedJob(c, key, hash); responded {
+			return err
 		}
-
-		params, err := buildCreateJobParams(req, hash, key, hasKey)
-		if err != nil {
-			return writeAPIError(c, http.StatusBadRequest, "VALIDATION_ERROR", err.Error(), nil)
-		}
-
-		if err := queries.CreateJob(ctx, params); err != nil {
-			if hasKey && isUniqueViolation(err) {
-				if job, ok, replayErr := replayCreateJobIfExists(ctx, queries, key, hash); replayErr != nil {
-					return writeAPIError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to load job after idempotency conflict", nil)
-				} else if ok {
-					if job == nil {
-						return writeAPIError(c, http.StatusConflict, "IDEMPOTENCY_KEY_REUSED", "idempotency key was already used with a different request body", nil)
-					}
-					return writeJSON(c, http.StatusOK, jobToResponse(*job))
-				}
-			}
-			return writeAPIError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to create job", nil)
-		}
-
-		job, err := queries.GetJob(ctx, params.ID)
-		if err != nil {
-			return writeAPIError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to load created job", nil)
-		}
-		return writeJSON(c, http.StatusCreated, jobToResponse(job))
 	}
+
+	params, err := buildCreateJobParams(req, payload, nextRun, key, hash, hasKey)
+	if err != nil {
+		return writeAPIError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to prepare job", nil)
+	}
+
+	job, err := s.queries.CreateJob(c.Request().Context(), params)
+	if err != nil {
+		if hasKey && isUniqueViolation(err) {
+			if responded, replayErr := s.replayCreatedJob(c, key, hash); responded {
+				return replayErr
+			}
+		}
+		return writeAPIError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to create job", nil)
+	}
+	return c.JSON(http.StatusCreated, jobToResponse(job))
 }
 
 // updateJob handles POST /v1/job/update/{job_id}.
 // Holds the job row lock through validation and update; active executions block edits.
 // Worker claims must acquire the same job row lock before transitioning a run.
-func updateJob(db *sql.DB, queries *sqlc.Queries) echo.HandlerFunc {
-	return func(c echo.Context) error {
-		jobID, err := uuid.Parse(c.Param("job_id"))
-		if err != nil {
-			return writeAPIError(c, http.StatusBadRequest, "VALIDATION_ERROR", "job_id must be a UUID", nil)
-		}
+func (s *server) updateJob(c echo.Context) error {
+	jobID, ok := pathUUID(c, "job_id")
+	if !ok {
+		return nil
+	}
 
-		var req UpdateJobRequest
-		if err := c.Bind(&req); err != nil {
-			return writeAPIError(c, http.StatusBadRequest, "VALIDATION_ERROR", "request body must be valid JSON", nil)
-		}
-		if err := c.Validate(&req); err != nil {
-			return writeValidationError(c, err)
-		}
+	var req UpdateJobRequest
+	if err := c.Bind(&req); err != nil {
+		return writeAPIError(c, http.StatusBadRequest, "VALIDATION_ERROR", "request body must be valid JSON", nil)
+	}
+	if err := c.Validate(&req); err != nil {
+		return writeValidationError(c, err)
+	}
 
-		ctx := c.Request().Context()
-		tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
-		if err != nil {
-			return writeAPIError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to begin transaction", nil)
-		}
-		defer tx.Rollback()
-		txQueries := queries.WithTx(tx)
-		existing, err := txQueries.GetJobForUpdate(ctx, jobID)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return writeAPIError(c, http.StatusNotFound, "NOT_FOUND", "job not found", nil)
-			}
-			return writeAPIError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to load job", nil)
-		}
+	ctx := c.Request().Context()
+	tx, qtx, err := s.beginTx(ctx)
+	if err != nil {
+		return writeAPIError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to begin transaction", nil)
+	}
+	defer tx.Rollback()
 
-		busy, err := txQueries.JobHasBusyRun(ctx, jobID)
-		if err != nil {
-			return writeAPIError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to check active runs", nil)
-		}
-		if busy {
-			return writeAPIError(c, http.StatusConflict, "JOB_BUSY", "job has a running execution", nil)
-		}
-
-		merged, err := MergeJobUpdate(existing, req)
-		if err != nil {
-			return writeAPIError(c, http.StatusBadRequest, "VALIDATION_ERROR", err.Error(), nil)
-		}
-		if err := ValidateScheduleFields(ScheduleFieldsFromJob(merged)); err != nil {
-			return writeAPIError(c, http.StatusBadRequest, "VALIDATION_ERROR", err.Error(), nil)
-		}
-
-		nextRun, err := computeNextRunAt(ScheduleFieldsFromJob(merged), time.Now().UTC())
-		if err != nil {
-			return writeAPIError(c, http.StatusBadRequest, "VALIDATION_ERROR", err.Error(), nil)
-		}
-		merged.NextRunAt = nextRun
-		merged.UpdatedAt = time.Now().UTC()
-
-		rows, err := txQueries.UpdateJob(ctx, jobToUpdateParams(merged))
-		if err != nil {
-			return writeAPIError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to update job", nil)
-		}
-		if rows == 0 {
+	existing, err := qtx.GetJobForUpdate(ctx, jobID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
 			return writeAPIError(c, http.StatusNotFound, "NOT_FOUND", "job not found", nil)
 		}
-
-		updated, err := txQueries.GetJob(ctx, jobID)
-		if err != nil {
-			return writeAPIError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to load updated job", nil)
-		}
-		if err := tx.Commit(); err != nil {
-			return writeAPIError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to commit updated job", nil)
-		}
-		return writeJSON(c, http.StatusOK, jobToResponse(updated))
+		return writeAPIError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to load job", nil)
 	}
+
+	busy, err := qtx.JobHasBusyRun(ctx, jobID)
+	if err != nil {
+		return writeAPIError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to check active runs", nil)
+	}
+	if busy {
+		return writeAPIError(c, http.StatusConflict, "JOB_BUSY", "job has a running execution", nil)
+	}
+
+	merged, err := MergeJobUpdate(existing, req)
+	if err != nil {
+		return writeAPIError(c, http.StatusBadRequest, "VALIDATION_ERROR", err.Error(), nil)
+	}
+	merged.NextRunAt, err = ScheduleFromJob(merged).NextRun(time.Now().UTC())
+	if err != nil {
+		return writeAPIError(c, http.StatusBadRequest, "VALIDATION_ERROR", err.Error(), nil)
+	}
+
+	if err := qtx.UpdateJob(ctx, jobToUpdateParams(merged)); err != nil {
+		return writeAPIError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to update job", nil)
+	}
+
+	updated, err := qtx.GetJob(ctx, jobID)
+	if err != nil {
+		return writeAPIError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to load updated job", nil)
+	}
+	if err := tx.Commit(); err != nil {
+		return writeAPIError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to commit updated job", nil)
+	}
+	return c.JSON(http.StatusOK, jobToResponse(updated))
 }
 
 // listJobs handles GET /v1/job/list with cursor pagination and optional schedule_type / event_type filters.
-func listJobs(queries *sqlc.Queries) echo.HandlerFunc {
-	return func(c echo.Context) error {
-		limit, cursor, err := ParseListCursor(c.Request())
-		if err != nil {
-			return writeAPIError(c, http.StatusBadRequest, "VALIDATION_ERROR", err.Error(), nil)
-		}
-
-		params := sqlc.ListJobsPageParams{Limit: limit + 1}
-		if v := c.QueryParam("schedule_type"); v != "" {
-			if v != ScheduleManual && v != ScheduleOnce && v != ScheduleCron {
-				return writeAPIError(c, http.StatusBadRequest, "VALIDATION_ERROR", "schedule_type must be MANUAL, ONCE, or CRON", nil)
-			}
-			params.ScheduleType = sql.NullString{String: v, Valid: true}
-		}
-		if v := c.QueryParam("event_type"); v != "" {
-			params.EventType = sql.NullString{String: v, Valid: true}
-		}
-		if cursor != uuid.Nil {
-			params.Cursor = uuid.NullUUID{UUID: cursor, Valid: true}
-		}
-
-		rows, err := queries.ListJobsPage(c.Request().Context(), params)
-		if err != nil {
-			return writeAPIError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to list jobs", nil)
-		}
-
-		hasMore := len(rows) > int(limit)
-		if hasMore {
-			rows = rows[:limit]
-		}
-
-		data := make([]ListJobItem, 0, len(rows))
-		for _, row := range rows {
-			data = append(data, listJobItemFromRow(row))
-		}
-
-		var nextCursor *string
-		if hasMore && len(rows) > 0 {
-			nextCursor = nextCursorFromID(rows[len(rows)-1].ID)
-		}
-
-		return writeJSON(c, http.StatusOK, ListJobsResponse{Data: data, NextCursor: nextCursor})
+func (s *server) listJobs(c echo.Context) error {
+	limit, cursor, err := ParseListCursor(c.Request())
+	if err != nil {
+		return writeAPIError(c, http.StatusBadRequest, "VALIDATION_ERROR", err.Error(), nil)
 	}
+
+	params := sqlc.ListJobsPageParams{Limit: limit + 1}
+	if v := c.QueryParam("schedule_type"); v != "" {
+		if !isValidScheduleType(v) {
+			return writeAPIError(c, http.StatusBadRequest, "VALIDATION_ERROR", "schedule_type must be MANUAL, ONCE, or CRON", nil)
+		}
+		params.ScheduleType = sql.NullString{String: v, Valid: true}
+	}
+	if v := c.QueryParam("event_type"); v != "" {
+		params.EventType = sql.NullString{String: v, Valid: true}
+	}
+	if cursor != uuid.Nil {
+		params.Cursor = uuid.NullUUID{UUID: cursor, Valid: true}
+	}
+
+	rows, err := s.queries.ListJobsPage(c.Request().Context(), params)
+	if err != nil {
+		return writeAPIError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to list jobs", nil)
+	}
+	rows, nextCursor := paginate(rows, limit, func(row sqlc.ListJobsPageRow) uuid.UUID { return row.ID })
+
+	data := make([]ListJobItem, 0, len(rows))
+	for _, row := range rows {
+		data = append(data, listJobItemFromRow(row))
+	}
+	return c.JSON(http.StatusOK, ListJobsResponse{Data: data, NextCursor: nextCursor})
 }
 
 // getJob handles GET /v1/job/get/{job_id}: job row plus optional latest run and per-status run counts.
-func getJob(queries *sqlc.Queries) echo.HandlerFunc {
-	return func(c echo.Context) error {
-		jobID, err := uuid.Parse(c.Param("job_id"))
-		if err != nil {
-			return writeAPIError(c, http.StatusBadRequest, "VALIDATION_ERROR", "job_id must be a UUID", nil)
-		}
-
-		ctx := c.Request().Context()
-		job, err := queries.GetJob(ctx, jobID)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return writeAPIError(c, http.StatusNotFound, "NOT_FOUND", "job not found", nil)
-			}
-			return writeAPIError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to load job", nil)
-		}
-
-		resp := GetJobResponse{
-			JobResponse: jobToResponse(job),
-			RunCounts:   map[string]int64{},
-		}
-
-		summary, err := queries.GetLatestJobRunSummary(ctx, jobID)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return writeAPIError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to load latest run", nil)
-		}
-		if err == nil {
-			mapped := latestRunSummary(summary)
-			resp.LatestRun = &mapped
-		}
-
-		counts, err := queries.JobRunStatusCounts(ctx, jobID)
-		if err != nil {
-			return writeAPIError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to load run counts", nil)
-		}
-		for _, row := range counts {
-			resp.RunCounts[row.Status] = row.Count
-		}
-
-		return writeJSON(c, http.StatusOK, resp)
+func (s *server) getJob(c echo.Context) error {
+	jobID, ok := pathUUID(c, "job_id")
+	if !ok {
+		return nil
 	}
+
+	ctx := c.Request().Context()
+	job, err := s.queries.GetJob(ctx, jobID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return writeAPIError(c, http.StatusNotFound, "NOT_FOUND", "job not found", nil)
+		}
+		return writeAPIError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to load job", nil)
+	}
+
+	resp := GetJobResponse{
+		JobResponse: jobToResponse(job),
+		RunCounts:   map[string]int64{},
+	}
+
+	summary, err := s.queries.GetLatestJobRunSummary(ctx, jobID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return writeAPIError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to load latest run", nil)
+	}
+	if err == nil {
+		mapped := latestRunSummary(summary)
+		resp.LatestRun = &mapped
+	}
+
+	counts, err := s.queries.JobRunStatusCounts(ctx, jobID)
+	if err != nil {
+		return writeAPIError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to load run counts", nil)
+	}
+	for _, row := range counts {
+		resp.RunCounts[row.Status] = row.Count
+	}
+
+	return c.JSON(http.StatusOK, resp)
 }
 
 // ParseListCursor reads limit (default 50, max 100) and optional cursor UUID from query strings.
@@ -489,24 +331,21 @@ func ParseListCursor(r *http.Request) (limit int32, cursor uuid.UUID, err error)
 	return limit, cursor, nil
 }
 
-// buildCreateJobParams assigns server-side fields (UUIDv7 id, timestamps, defaults, next_run_at)
-// and optional idempotency columns before sqlc CreateJob runs.
-func buildCreateJobParams(req CreateJobRequest, hash string, idempotencyKey string, hasKey bool) (sqlc.CreateJobParams, error) {
-	payload := req.Payload
+// normalizePayload applies the default empty object and rejects invalid JSON.
+func normalizePayload(payload json.RawMessage) (json.RawMessage, error) {
 	if len(payload) == 0 {
-		payload = json.RawMessage(`{}`)
+		return json.RawMessage(`{}`), nil
 	}
 	if !json.Valid(payload) {
-		return sqlc.CreateJobParams{}, fmt.Errorf("payload must be valid JSON")
+		return nil, fmt.Errorf("payload must be valid JSON")
 	}
+	return payload, nil
+}
 
+// buildCreateJobParams assigns server-side fields (UUIDv7 id, defaults, next_run_at)
+// and optional idempotency columns before sqlc CreateJob runs.
+func buildCreateJobParams(req CreateJobRequest, payload json.RawMessage, nextRun sql.NullTime, idempotencyKey, hash string, hasKey bool) (sqlc.CreateJobParams, error) {
 	id, err := uuid.NewV7()
-	if err != nil {
-		return sqlc.CreateJobParams{}, err
-	}
-	now := time.Now().UTC()
-	spec := ScheduleFieldsFromCreate(req)
-	nextRun, err := computeNextRunAt(spec, now)
 	if err != nil {
 		return sqlc.CreateJobParams{}, err
 	}
@@ -532,9 +371,15 @@ func buildCreateJobParams(req CreateJobRequest, hash string, idempotencyKey stri
 		TimeoutSeconds:       int32OrDefault(req.TimeoutSeconds, defaultTimeoutSeconds),
 		CreateIdempotencyKey: idempotencyKeyNull,
 		CreateRequestHash:    requestHashNull,
-		CreatedAt:            now,
-		UpdatedAt:            now,
 	}, nil
+}
+
+// int32OrDefault applies server defaults for retry/timeout fields when the client omits them.
+func int32OrDefault(value *int32, defaultValue int32) int32 {
+	if value == nil {
+		return defaultValue
+	}
+	return *value
 }
 
 // MergeJobUpdate overlays a PATCH-style body onto the stored job, including clearing schedule
@@ -548,18 +393,18 @@ func MergeJobUpdate(existing sqlc.Job, patch UpdateJobRequest) (sqlc.Job, error)
 		merged.EventType = strings.TrimSpace(*patch.EventType)
 	}
 	if len(patch.Payload) > 0 {
-		if !json.Valid(patch.Payload) {
-			return sqlc.Job{}, fmt.Errorf("payload must be valid JSON")
+		payload, err := normalizePayload(patch.Payload)
+		if err != nil {
+			return sqlc.Job{}, err
 		}
-		merged.Payload = patch.Payload
+		merged.Payload = payload
 	}
 	if patch.ScheduleType != nil {
 		merged.ScheduleType = *patch.ScheduleType
-		switch *patch.ScheduleType {
+		switch merged.ScheduleType {
 		case ScheduleManual:
 			merged.ScheduledAt = sql.NullTime{}
 			merged.CronExpression = sql.NullString{}
-			merged.NextRunAt = sql.NullTime{}
 		case ScheduleOnce:
 			merged.CronExpression = sql.NullString{}
 		case ScheduleCron:
@@ -575,8 +420,6 @@ func MergeJobUpdate(existing sqlc.Job, patch UpdateJobRequest) (sqlc.Job, error)
 	}
 	if patch.CronExpression != nil {
 		merged.CronExpression = nullString(patch.CronExpression)
-	} else if patch.ScheduleType != nil && *patch.ScheduleType != ScheduleCron {
-		merged.CronExpression = sql.NullString{}
 	}
 	if patch.Timezone != nil {
 		merged.Timezone = TimezoneOrDefault(*patch.Timezone)
@@ -594,6 +437,7 @@ func MergeJobUpdate(existing sqlc.Job, patch UpdateJobRequest) (sqlc.Job, error)
 }
 
 // jobToUpdateParams copies the merged in-memory job into sqlc's UpdateJob argument struct.
+// updated_at is owned by the jobs_set_updated_at trigger.
 func jobToUpdateParams(job sqlc.Job) sqlc.UpdateJobParams {
 	return sqlc.UpdateJobParams{
 		ID:                job.ID,
@@ -608,18 +452,6 @@ func jobToUpdateParams(job sqlc.Job) sqlc.UpdateJobParams {
 		MaxAttempts:       job.MaxAttempts,
 		RetryDelaySeconds: job.RetryDelaySeconds,
 		TimeoutSeconds:    job.TimeoutSeconds,
-		UpdatedAt:         job.UpdatedAt,
-	}
-}
-
-// ScheduleFieldsFromJob converts DB null types to pointers so the same validators run on update as on create.
-func ScheduleFieldsFromJob(job sqlc.Job) ScheduleFields {
-	return ScheduleFields{
-		ScheduleType:   job.ScheduleType,
-		ScheduledAt:    nullTimePtr(job.ScheduledAt),
-		CronExpression: nullStringPtr(job.CronExpression),
-		Timezone:       job.Timezone,
-		NextRunAt:      nullTimePtr(job.NextRunAt),
 	}
 }
 
@@ -675,44 +507,4 @@ func listRowJob(row sqlc.ListJobsPageRow) sqlc.Job {
 		CreateIdempotencyKey: row.CreateIdempotencyKey, CreateRequestHash: row.CreateRequestHash,
 		CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
 	}
-}
-
-// nullTimePtr exposes sql.NullTime as JSON-friendly *time.Time (nil means SQL NULL).
-func nullTimePtr(value sql.NullTime) *time.Time {
-	if !value.Valid {
-		return nil
-	}
-	t := value.Time
-	return &t
-}
-
-// nullStringPtr exposes sql.NullString as *string for optional JSON fields.
-func nullStringPtr(value sql.NullString) *string {
-	if !value.Valid {
-		return nil
-	}
-	s := value.String
-	return &s
-}
-
-// nextCursorFromID returns the last job id on a full page; clients pass it as cursor for the next page.
-func nextCursorFromID(id uuid.UUID) *string {
-	s := id.String()
-	return &s
-}
-
-// nullTime stores an optional API time pointer into sql.NullTime for writes.
-func nullTime(value *time.Time) sql.NullTime {
-	if value == nil {
-		return sql.NullTime{}
-	}
-	return sql.NullTime{Time: *value, Valid: true}
-}
-
-// nullString stores an optional API string pointer into sql.NullString for writes.
-func nullString(value *string) sql.NullString {
-	if value == nil {
-		return sql.NullString{}
-	}
-	return sql.NullString{String: *value, Valid: true}
 }

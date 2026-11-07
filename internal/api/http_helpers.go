@@ -7,10 +7,6 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
-func writeJSON(c echo.Context, status int, body any) error {
-	return c.JSON(status, body)
-}
-
 func writeAPIError(c echo.Context, status int, code, message string, details any) error {
 	payload := map[string]any{
 		"error": map[string]any{
@@ -21,7 +17,7 @@ func writeAPIError(c echo.Context, status int, code, message string, details any
 	if details != nil {
 		payload["error"].(map[string]any)["details"] = details
 	}
-	return writeJSON(c, status, payload)
+	return c.JSON(status, payload)
 }
 
 func writeValidationError(c echo.Context, err error) error {

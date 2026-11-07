@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 
-	"github.com/fishstick/internal/database/sqlc"
 	"github.com/labstack/echo/v4"
 )
 
@@ -19,30 +18,25 @@ func NewTestRouter(db *sql.DB) *echo.Echo {
 }
 
 func newRouter(db *sql.DB, testMode bool) *echo.Echo {
-	queries := sqlc.New(db)
-	e := echo.New()
-	if testMode {
-		configureEchoForTest(e)
-	} else {
-		configureEcho(e)
-	}
+	s := newServer(db)
+	e := newEcho(testMode)
 
 	v1 := e.Group("/v1")
 	var healthCheck func(context.Context) (int32, error)
-	if db != nil {
-		healthCheck = queries.HealthCheck
+	if s.db != nil {
+		healthCheck = s.queries.HealthCheck
 	}
 	v1.GET("/health/db", DatabaseHealth(healthCheck))
 
-	v1.POST("/job/create", createJob(queries))
-	v1.GET("/list_runs", listRuns(queries))
-	v1.GET("/job/get/:job_id", getJob(queries))
-	v1.GET("/job/list", listJobs(queries))
-	v1.GET("/job/:job_id/runs", listJobRuns(queries))
-	v1.GET("/job/:job_id/run/:run_id", getJobRun(queries))
-	v1.POST("/cancel_run/:run_id", cancelRun(db, queries))
-	v1.POST("/job/update/:job_id", updateJob(db, queries))
-	v1.POST("/job/trigger/:job_id", triggerJob(db, queries))
+	v1.POST("/job/create", s.createJob)
+	v1.GET("/list_runs", s.listRuns)
+	v1.GET("/job/get/:job_id", s.getJob)
+	v1.GET("/job/list", s.listJobs)
+	v1.GET("/job/:job_id/runs", s.listJobRuns)
+	v1.GET("/job/:job_id/run/:run_id", s.getJobRun)
+	v1.POST("/cancel_run/:run_id", s.cancelRun)
+	v1.POST("/job/update/:job_id", s.updateJob)
+	v1.POST("/job/trigger/:job_id", s.triggerJob)
 
 	return e
 }

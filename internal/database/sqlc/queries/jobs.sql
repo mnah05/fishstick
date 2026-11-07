@@ -1,4 +1,4 @@
--- name: CreateJob :exec
+-- name: CreateJob :one
 INSERT INTO jobs (
     id,
     name,
@@ -13,14 +13,13 @@ INSERT INTO jobs (
     retry_delay_seconds,
     timeout_seconds,
     create_idempotency_key,
-    create_request_hash,
-    created_at,
-    updated_at
+    create_request_hash
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
-);
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
+)
+RETURNING *;
 
--- name: UpdateJob :execrows
+-- name: UpdateJob :exec
 UPDATE jobs
 SET
     name = $2,
@@ -33,8 +32,7 @@ SET
     next_run_at = $9,
     max_attempts = $10,
     retry_delay_seconds = $11,
-    timeout_seconds = $12,
-    updated_at = $13
+    timeout_seconds = $12
 WHERE id = $1;
 
 -- name: GetJobForUpdate :one

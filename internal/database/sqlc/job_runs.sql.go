@@ -14,28 +14,28 @@ import (
 	"github.com/google/uuid"
 )
 
-const cancelRunImmediate = `-- name: CancelRunImmediate :one
+const cancelRun = `-- name: CancelRun :one
 UPDATE job_runs
 SET
-    status = 'CANCELLED',
+    status = CASE WHEN status = 'RUNNING' THEN 'CANCEL_REQUESTED' ELSE 'CANCELLED' END,
     cancel_requested_at = $2,
-    cancelled_at = $2,
-    cancel_reason = COALESCE($3::text, cancel_reason),
-    updated_at = CURRENT_TIMESTAMP
+    cancelled_at = CASE WHEN status = 'RUNNING' THEN NULL ELSE $2 END,
+    cancel_reason = COALESCE($3::text, cancel_reason)
 WHERE id = $1
-  AND status IN ('QUEUED', 'SCHEDULED', 'RETRY_WAIT')
+  AND status IN ('QUEUED', 'SCHEDULED', 'RETRY_WAIT', 'RUNNING')
 RETURNING id, job_id, retry_of_run_id, scheduled_for, trigger_source, trigger_idempotency_key, trigger_request_hash, event_type_snapshot, payload_snapshot, timeout_seconds, status, attempt_count, max_attempts, worker_id, fencing_token, lease_expires_at, heartbeat_at, retry_at, deadline_at, started_at, last_attempt_started_at, finished_at, cancel_requested_at, cancelled_at, cancel_reason, last_error, exit_code, result, created_at, updated_at
 `
 
-type CancelRunImmediateParams struct {
+type CancelRunParams struct {
 	ID                uuid.UUID
 	CancelRequestedAt sql.NullTime
 	CancelReason      sql.NullString
 }
 
-// Pre-running: mark fully cancelled in one step.
-func (q *Queries) CancelRunImmediate(ctx context.Context, arg CancelRunImmediateParams) (JobRun, error) {
-	row := q.db.QueryRowContext(ctx, cancelRunImmediate, arg.ID, arg.CancelRequestedAt, arg.CancelReason)
+// Pre-running rows become CANCELLED; RUNNING rows become CANCEL_REQUESTED for the
+// worker to finish. The status set is the single source of truth for cancellable states.
+func (q *Queries) CancelRun(ctx context.Context, arg CancelRunParams) (JobRun, error) {
+	row := q.db.QueryRowContext(ctx, cancelRun, arg.ID, arg.CancelRequestedAt, arg.CancelReason)
 	var i JobRun
 	err := row.Scan(
 		&i.ID,
@@ -78,8 +78,7 @@ SET
     status = 'RUNNING',
     started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
     lease_expires_at = $3,
-    worker_id = $4,
-    updated_at = CURRENT_TIMESTAMP
+    worker_id = $4
 WHERE id = $1
   AND job_id = $2
   AND status IN ('QUEUED', 'SCHEDULED', 'RETRY_WAIT')
@@ -543,63 +542,6 @@ func (q *Queries) ManualJobRun(ctx context.Context, arg ManualJobRunParams) (Job
 		arg.TimeoutSeconds,
 		arg.MaxAttempts,
 	)
-	var i JobRun
-	err := row.Scan(
-		&i.ID,
-		&i.JobID,
-		&i.RetryOfRunID,
-		&i.ScheduledFor,
-		&i.TriggerSource,
-		&i.TriggerIdempotencyKey,
-		&i.TriggerRequestHash,
-		&i.EventTypeSnapshot,
-		&i.PayloadSnapshot,
-		&i.TimeoutSeconds,
-		&i.Status,
-		&i.AttemptCount,
-		&i.MaxAttempts,
-		&i.WorkerID,
-		&i.FencingToken,
-		&i.LeaseExpiresAt,
-		&i.HeartbeatAt,
-		&i.RetryAt,
-		&i.DeadlineAt,
-		&i.StartedAt,
-		&i.LastAttemptStartedAt,
-		&i.FinishedAt,
-		&i.CancelRequestedAt,
-		&i.CancelledAt,
-		&i.CancelReason,
-		&i.LastError,
-		&i.ExitCode,
-		&i.Result,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-	)
-	return i, err
-}
-
-const requestRunCancellation = `-- name: RequestRunCancellation :one
-UPDATE job_runs
-SET
-    status = 'CANCEL_REQUESTED',
-    cancel_requested_at = COALESCE(cancel_requested_at, $2),
-    cancel_reason = COALESCE($3::text, cancel_reason),
-    updated_at = CURRENT_TIMESTAMP
-WHERE id = $1
-  AND status = 'RUNNING'
-RETURNING id, job_id, retry_of_run_id, scheduled_for, trigger_source, trigger_idempotency_key, trigger_request_hash, event_type_snapshot, payload_snapshot, timeout_seconds, status, attempt_count, max_attempts, worker_id, fencing_token, lease_expires_at, heartbeat_at, retry_at, deadline_at, started_at, last_attempt_started_at, finished_at, cancel_requested_at, cancelled_at, cancel_reason, last_error, exit_code, result, created_at, updated_at
-`
-
-type RequestRunCancellationParams struct {
-	ID                uuid.UUID
-	CancelRequestedAt sql.NullTime
-	CancelReason      sql.NullString
-}
-
-// Running: record request; worker completes transition to CANCELLED.
-func (q *Queries) RequestRunCancellation(ctx context.Context, arg RequestRunCancellationParams) (JobRun, error) {
-	row := q.db.QueryRowContext(ctx, requestRunCancellation, arg.ID, arg.CancelRequestedAt, arg.CancelReason)
 	var i JobRun
 	err := row.Scan(
 		&i.ID,

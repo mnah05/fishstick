@@ -19,26 +19,27 @@ type Config struct {
 	DatabaseConnectTimeout  time.Duration `koanf:"database_connect_timeout"`
 }
 
+// defaultValues are the only defaults; the empty-override check below iterates
+// the same keys so adding a setting cannot forget one.
+var defaultValues = map[string]any{
+	"database_max_open_conns":     25,
+	"database_max_idle_conns":     5,
+	"database_conn_max_lifetime":  "30m",
+	"database_conn_max_idle_time": "5m",
+	"database_connect_timeout":    "5s",
+}
+
 // NewConfig loads defaults followed by DATABASE_* environment overrides.
 func NewConfig() (*Config, error) {
 	k := koanf.New(".")
-	if err := k.Load(confmap.Provider(map[string]interface{}{
-		"database_max_open_conns":     25,
-		"database_max_idle_conns":     5,
-		"database_conn_max_lifetime":  "30m",
-		"database_conn_max_idle_time": "5m",
-		"database_connect_timeout":    "5s",
-	}, "."), nil); err != nil {
+	if err := k.Load(confmap.Provider(defaultValues, "."), nil); err != nil {
 		return nil, fmt.Errorf("load configuration defaults: %w", err)
 	}
 	if err := k.Load(env.Provider("DATABASE_", ".", strings.ToLower), nil); err != nil {
 		return nil, fmt.Errorf("load environment configuration: %w", err)
 	}
 	// Reject empty overrides before weak decoding can turn them into zero limits.
-	for _, key := range []string{
-		"database_max_open_conns", "database_max_idle_conns",
-		"database_conn_max_lifetime", "database_conn_max_idle_time", "database_connect_timeout",
-	} {
+	for key := range defaultValues {
 		if value, ok := k.Get(key).(string); ok && strings.TrimSpace(value) == "" {
 			return nil, fmt.Errorf("decode configuration: %s must not be empty", strings.ToUpper(key))
 		}

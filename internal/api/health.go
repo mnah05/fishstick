@@ -21,12 +21,7 @@ func DatabaseHealth(healthCheck func(context.Context) (int32, error)) echo.Handl
 			healthy, err = healthCheck(ctx)
 		}
 		if err != nil || healthy != 1 {
-			return c.JSON(http.StatusServiceUnavailable, map[string]any{
-				"error": map[string]string{
-					"code":    "DATABASE_UNAVAILABLE",
-					"message": "database health check failed",
-				},
-			})
+			return writeAPIError(c, http.StatusServiceUnavailable, "DATABASE_UNAVAILABLE", "database health check failed", nil)
 		}
 		return c.JSON(http.StatusOK, map[string]string{
 			"status": "ok", "database": "connected",

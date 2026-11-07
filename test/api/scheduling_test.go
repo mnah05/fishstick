@@ -48,7 +48,7 @@ func TestValidateSchedule(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			err := api.ValidateScheduleFields(api.ScheduleFieldsFromCreate(test.req))
+			_, err := api.ScheduleFromCreate(test.req).NextRun(time.Now())
 			if test.wantErr == "" {
 				if err != nil {
 					t.Fatal(err)

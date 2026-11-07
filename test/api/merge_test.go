@@ -31,7 +31,7 @@ func TestMergeJobUpdateOnceToCronClearsScheduledAt(t *testing.T) {
 	if merged.ScheduledAt.Valid {
 		t.Fatalf("scheduled_at should be cleared, got %v", merged.ScheduledAt)
 	}
-	if err := api.ValidateScheduleFields(api.ScheduleFieldsFromJob(merged)); err != nil {
+	if _, err := api.ScheduleFromJob(merged).NextRun(time.Now()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -60,7 +60,7 @@ func TestMergeJobUpdateExplicitNullScheduledAt(t *testing.T) {
 
 func TestValidateScheduleRejectsInvalidTimezoneForManual(t *testing.T) {
 	t.Parallel()
-	err := api.ValidateScheduleFields(api.ScheduleFields{ScheduleType: api.ScheduleManual, Timezone: "Not/A_Zone"})
+	_, err := api.Schedule{Type: api.ScheduleManual, Timezone: "Not/A_Zone"}.NextRun(time.Now())
 	if err == nil {
 		t.Fatal("expected timezone error")
 	}

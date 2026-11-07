@@ -2,7 +2,9 @@
 
 SQL sources live in `queries/`. SQLC reads `../migrations/` as its schema;
 those migration files are the source of truth for database changes. Apply them
-with `go run ./cmd/migrate`. SQLC generation does not change the database.
+with the goose CLI:
+`goose -dir internal/database/migrations postgres "$DATABASE_URL" up`.
+SQLC generation does not change the database.
 
 ## Generate Go code
 

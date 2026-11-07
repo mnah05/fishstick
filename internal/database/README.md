@@ -8,18 +8,15 @@ From the project root:
 docker compose up -d
 export DATABASE_URL='postgres://postgres:postgres@localhost:5432/fishstick?sslmode=disable'
 
-# 1) Schema (goose migrations)
-go run ./cmd/migrate
-
-# 2) Dev seed data (separate step; truncates job tables first)
-go run ./cmd/seed
+# Schema (goose migrations)
+goose -dir internal/database/migrations postgres "$DATABASE_URL" up
 ```
 
-Migration files: `internal/database/migrations/` (tool: [goose](https://github.com/pressly/goose)). sqlc reads the same migration files, so the schema has one source of truth.
+Migration files: `internal/database/migrations/` (tool: [goose](https://github.com/pressly/goose)). sqlc reads the same migration files, so the schema has one source of truth. Install the goose CLI with `go install github.com/pressly/goose/v3/cmd/goose@latest`.
 
 ```sh
-go run ./cmd/migrate status   # view applied version
-go run ./cmd/migrate down     # rollback last migration
+goose -dir internal/database/migrations postgres "$DATABASE_URL" status   # view applied version
+goose -dir internal/database/migrations postgres "$DATABASE_URL" down     # rollback last migration
 ```
 
 ## Reset everything
@@ -28,26 +25,10 @@ go run ./cmd/migrate down     # rollback last migration
 docker compose down -v
 docker compose up -d
 export DATABASE_URL='postgres://postgres:postgres@localhost:5432/fishstick?sslmode=disable'
-go run ./cmd/migrate
-go run ./cmd/seed
+goose -dir internal/database/migrations postgres "$DATABASE_URL" up
 ```
 
-## Schema vs seed
-
-| Step | Command | What it does |
-|------|---------|----------------|
-| Migrations | `go run ./cmd/migrate` | Creates tables, indexes, triggers (`goose_db_version`) |
-| Seed | `go run ./cmd/seed` | Truncates the job tables (`TRUNCATE jobs CASCADE`) and loads `internal/database/seed.sql` demo rows |
-
 sqlc and the integration tests both use the migration files; do not maintain a separate schema snapshot.
-
-## Seed UUIDs
-
-| Resource | ID |
-|----------|-----|
-| Job `demo-manual` | `01933e8c-0000-7000-8000-000000000001` |
-| Job `demo-once` | `01933e8c-0000-7000-8000-000000000002` |
-| Job `demo-cron` | `01933e8c-0000-7000-8000-000000000003` |
 
 ## Run the API
 

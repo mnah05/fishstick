@@ -7,8 +7,7 @@ From the project root:
 ```sh
 docker compose up -d
 export DATABASE_URL='postgres://postgres:postgres@localhost:5432/fishstick?sslmode=disable'
-go run ./cmd/migrate
-go run ./cmd/seed   # optional: replaces existing job/run/outbox/DLQ data
+goose -dir internal/database/migrations postgres "$DATABASE_URL" up
 go run ./cmd/api
 ```
 
@@ -22,14 +21,14 @@ Health:
 curl -s http://localhost:8080/v1/health/db | jq .
 ```
 
-Seeded job:
+Jobs (replace `<job-id>` with an id returned by the create or list endpoint):
 
 ```sh
-curl -s http://localhost:8080/v1/job/get/01933e8c-0000-7000-8000-000000000001 | jq .
+curl -s http://localhost:8080/v1/job/get/<job-id> | jq .
 curl -s 'http://localhost:8080/v1/job/list?limit=10' | jq .
-curl -s 'http://localhost:8080/v1/job/01933e8c-0000-7000-8000-000000000001/runs?limit=5' | jq .
-# After seed: use a run id from the list response:
-curl -s 'http://localhost:8080/v1/job/01933e8c-0000-7000-8000-000000000001/run/01933e8c-0000-7000-8000-000000000011' | jq .
+curl -s 'http://localhost:8080/v1/job/<job-id>/runs?limit=5' | jq .
+# Use a run id from the runs response:
+curl -s 'http://localhost:8080/v1/job/<job-id>/run/<run-id>' | jq .
 ```
 
 Create job (server assigns id):
@@ -62,8 +61,7 @@ Create database `fishstick`, then:
 
 ```sh
 export DATABASE_URL='postgres://...'
-go run ./cmd/migrate
-go run ./cmd/seed   # optional dev fixtures
+goose -dir internal/database/migrations postgres "$DATABASE_URL" up
 go run ./cmd/api
 ```
 

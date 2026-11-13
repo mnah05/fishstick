@@ -6,6 +6,10 @@ routes with minimal Echo middleware for tests (no request-logging middleware).
 There is no authentication.
 [router.go](router.go) is the authoritative route list.
 
+See [state-machines.md](../../docs/state-machines.md) for persisted state
+values, implemented transitions, and transitions that depend on components not
+included in this repository.
+
 ## Routes
 
 | Method | Path | Success response |

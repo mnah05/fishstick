@@ -281,17 +281,17 @@ func (s *server) cancelRun(c echo.Context) error {
 		return writeAPIError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to load run", nil)
 	}
 
-	switch {
-	case run.Status == RunStatusCancelRequested:
+	switch cancelDispositionFor(run.Status) {
+	case cancelAlreadyRequested:
 		if err := tx.Commit(); err != nil {
 			return writeAPIError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to commit", nil)
 		}
 		return c.JSON(http.StatusOK, runToResponse(run))
-	case isTerminalRunStatus(run.Status):
+	case cancelTerminal:
 		return writeAPIError(c, http.StatusConflict, "RUN_ALREADY_TERMINAL", "run is already in a terminal state", map[string]any{
 			"status": run.Status,
 		})
-	case run.Status == RunStatusRunning:
+	case cancelCooperatively:
 		updated, err := qtx.CancelRun(ctx, sqlc.CancelRunParams{
 			ID: runID, CancelRequestedAt: reqTime, CancelReason: reason,
 		})
@@ -302,7 +302,7 @@ func (s *server) cancelRun(c echo.Context) error {
 			return writeAPIError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to commit cancellation request", nil)
 		}
 		return c.JSON(http.StatusAccepted, runToResponse(updated))
-	case isPreRunStatus(run.Status):
+	case cancelImmediately:
 		updated, err := qtx.CancelRun(ctx, sqlc.CancelRunParams{
 			ID: runID, CancelRequestedAt: reqTime, CancelReason: reason,
 		})

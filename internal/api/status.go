@@ -11,40 +11,39 @@ const (
 	RunStatusCancelled       = "CANCELLED"
 )
 
-var validRunStatuses = map[string]struct{}{
-	RunStatusScheduled:       {},
-	RunStatusQueued:          {},
-	RunStatusRunning:         {},
-	RunStatusRetryWait:       {},
-	RunStatusCancelRequested: {},
-	RunStatusSucceeded:       {},
-	RunStatusFailed:          {},
-	RunStatusCancelled:       {},
+type cancelDisposition uint8
+
+const (
+	cancelUnsupported cancelDisposition = iota
+	cancelImmediately
+	cancelCooperatively
+	cancelAlreadyRequested
+	cancelTerminal
+)
+
+// runStatusCancellation is the API's single run-status registry. It drives
+// query validation and the cancellation behavior for every persisted status.
+var runStatusCancellation = map[string]cancelDisposition{
+	RunStatusScheduled:       cancelImmediately,
+	RunStatusQueued:          cancelImmediately,
+	RunStatusRunning:         cancelCooperatively,
+	RunStatusRetryWait:       cancelImmediately,
+	RunStatusCancelRequested: cancelAlreadyRequested,
+	RunStatusSucceeded:       cancelTerminal,
+	RunStatusFailed:          cancelTerminal,
+	RunStatusCancelled:       cancelTerminal,
 }
 
 func isValidRunStatus(value string) bool {
-	_, ok := validRunStatuses[value]
+	_, ok := runStatusCancellation[value]
 	return ok
 }
 
-func isTerminalRunStatus(value string) bool {
-	switch value {
-	case RunStatusSucceeded, RunStatusFailed, RunStatusCancelled:
-		return true
-	default:
-		return false
+func cancelDispositionFor(status string) cancelDisposition {
+	if disposition, ok := runStatusCancellation[status]; ok {
+		return disposition
 	}
-}
-
-// isPreRunStatus reports states a worker has not claimed yet, where cancel can
-// move straight to CANCELLED.
-func isPreRunStatus(value string) bool {
-	switch value {
-	case RunStatusQueued, RunStatusScheduled, RunStatusRetryWait:
-		return true
-	default:
-		return false
-	}
+	return cancelUnsupported
 }
 
 const (

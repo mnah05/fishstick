@@ -19,7 +19,8 @@ UPDATE job_runs
 SET
     status = CASE WHEN status = 'RUNNING' THEN 'CANCEL_REQUESTED' ELSE 'CANCELLED' END,
     cancel_requested_at = $2,
-    cancelled_at = CASE WHEN status = 'RUNNING' THEN NULL ELSE $2 END,
+    cancelled_at = CASE WHEN status = 'RUNNING' THEN NULL
+        ELSE $2::timestamptz END,
     cancel_reason = COALESCE($3::text, cancel_reason)
 WHERE id = $1
   AND status IN ('QUEUED', 'SCHEDULED', 'RETRY_WAIT', 'RUNNING')

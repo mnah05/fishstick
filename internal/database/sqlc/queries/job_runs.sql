@@ -86,8 +86,9 @@ SELECT * FROM job_runs WHERE id = $1 FOR UPDATE;
 UPDATE job_runs
 SET
     status = CASE WHEN status = 'RUNNING' THEN 'CANCEL_REQUESTED' ELSE 'CANCELLED' END,
-    cancel_requested_at = $2,
-    cancelled_at = CASE WHEN status = 'RUNNING' THEN NULL ELSE $2 END,
+    cancel_requested_at = sqlc.arg('cancel_requested_at'),
+    cancelled_at = CASE WHEN status = 'RUNNING' THEN NULL
+        ELSE sqlc.arg('cancel_requested_at')::timestamptz END,
     cancel_reason = COALESCE(sqlc.narg('cancel_reason')::text, cancel_reason)
 WHERE id = $1
   AND status IN ('QUEUED', 'SCHEDULED', 'RETRY_WAIT', 'RUNNING')

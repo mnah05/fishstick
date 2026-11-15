@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -19,6 +20,16 @@ type Config struct {
 	DatabaseConnectTimeout  time.Duration `koanf:"database_connect_timeout"`
 }
 
+// SchedulerConfig contains settings used only by cmd/schedular. Keeping it
+// separate lets the API validate database settings without requiring scheduler
+// configuration to be relevant to that process.
+type SchedulerConfig struct {
+	Interval      time.Duration `koanf:"interval"`
+	BatchSize     int           `koanf:"batch_size"`
+	ShutdownGrace time.Duration `koanf:"shutdown_grace"`
+	HealthAddress string        `koanf:"health_address"`
+}
+
 // defaultValues are the only defaults; the empty-override check below iterates
 // the same keys so adding a setting cannot forget one.
 var defaultValues = map[string]any{
@@ -27,6 +38,60 @@ var defaultValues = map[string]any{
 	"database_conn_max_lifetime":  "30m",
 	"database_conn_max_idle_time": "5m",
 	"database_connect_timeout":    "5s",
+}
+
+var schedulerDefaultValues = map[string]any{
+	"interval":       "5s",
+	"batch_size":     100,
+	"shutdown_grace": "10s",
+	"health_address": ":8081",
+}
+
+// NewSchedulerConfig loads scheduler defaults and overrides them with
+// SCHEDULER_* environment variables through Koanf.
+func NewSchedulerConfig() (*SchedulerConfig, error) {
+	k := koanf.New(".")
+	if err := k.Load(confmap.Provider(schedulerDefaultValues, "."), nil); err != nil {
+		return nil, fmt.Errorf("load scheduler configuration defaults: %w", err)
+	}
+	if err := k.Load(env.Provider("SCHEDULER_", ".", func(key string) string {
+		return strings.ToLower(strings.TrimPrefix(key, "SCHEDULER_"))
+	}), nil); err != nil {
+		return nil, fmt.Errorf("load scheduler environment configuration: %w", err)
+	}
+	for key := range schedulerDefaultValues {
+		if value, ok := k.Get(key).(string); ok && strings.TrimSpace(value) == "" {
+			return nil, fmt.Errorf("decode scheduler configuration: SCHEDULER_%s must not be empty", strings.ToUpper(key))
+		}
+	}
+	var cfg SchedulerConfig
+	if err := k.Unmarshal("", &cfg); err != nil {
+		return nil, fmt.Errorf("decode scheduler configuration: %w", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
+// Validate also checks scheduler configurations constructed by callers.
+func (c *SchedulerConfig) Validate() error {
+	if c == nil {
+		return fmt.Errorf("scheduler configuration is required")
+	}
+	if c.Interval <= 0 {
+		return fmt.Errorf("SCHEDULER_INTERVAL must be positive")
+	}
+	if c.BatchSize <= 0 || int64(c.BatchSize) > math.MaxInt32 {
+		return fmt.Errorf("SCHEDULER_BATCH_SIZE must be a positive 32-bit integer")
+	}
+	if c.ShutdownGrace <= 0 {
+		return fmt.Errorf("SCHEDULER_SHUTDOWN_GRACE must be positive")
+	}
+	if strings.TrimSpace(c.HealthAddress) == "" {
+		return fmt.Errorf("SCHEDULER_HEALTH_ADDRESS must not be empty")
+	}
+	return nil
 }
 
 // NewConfig loads defaults followed by DATABASE_* environment overrides.

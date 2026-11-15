@@ -25,6 +25,7 @@ Edit SQL sources and configuration, not generated Go files.
 | `jobs_list.sql` | Fetch jobs, creation idempotency, busy-run check, paginated listing with nullable latest-run fields |
 | `job_runs.sql` | Latest run, status counts, get/list runs by job, filtered global run list, cancel run (immediate / request), manual run insert, trigger idempotency lookup, claim-to-running |
 | `outbox.sql` | Insert a pending dispatch event |
+| `scheduler.sql` | Lock due jobs, isolate each occurrence with savepoints, insert one queued scheduled run and its pending dispatch event, advance `next_run_at` |
 
 The package uses `database/sql` and application-generated UUIDv7 IDs. Nullable
 JSONB uses `sql.Null[[]byte]`; check `Valid` before decoding `V`. API handlers map

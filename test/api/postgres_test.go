@@ -3,12 +3,12 @@ package api_test
 import (
 	"database/sql"
 	"net/url"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/fishstick/internal/database"
+	"github.com/fishstick/internal/testsupport"
 	"github.com/google/uuid"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -16,10 +16,7 @@ import (
 // Each integration test gets its own schema, including tables and test triggers.
 func newIntegrationDB(t *testing.T) *sql.DB {
 	t.Helper()
-	rawURL := os.Getenv("TEST_DATABASE_URL")
-	if rawURL == "" {
-		t.Skip("set TEST_DATABASE_URL to run PostgreSQL integration tests")
-	}
+	rawURL := testsupport.DatabaseURL(t)
 	u, err := url.Parse(rawURL)
 	if err != nil || (u.Scheme != "postgres" && u.Scheme != "postgresql") {
 		t.Fatal("TEST_DATABASE_URL must be a postgres:// or postgresql:// URL")

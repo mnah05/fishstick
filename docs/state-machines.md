@@ -2,8 +2,9 @@
 
 This document records the states and transitions currently represented by
 Fishstick. The migrations are authoritative for persisted values. API behavior
-is implemented in `internal/api`; scheduler, worker, outbox relay, and
-dead-letter resolution processes are not part of this repository yet.
+is implemented in `internal/api`. The scheduler in `cmd/schedular` creates
+due occurrences. Worker completion, outbox relay, and dead-letter resolution
+are not part of this repository yet.
 
 ## Job definitions
 
@@ -13,16 +14,56 @@ constrained by the database and API:
 | `schedule_type` | Required fields | Fields that must be absent | `next_run_at` |
 | --- | --- | --- | --- |
 | `MANUAL` | — | `scheduled_at`, `cron_expression` | null |
-| `ONCE` | `scheduled_at` | `cron_expression` | one-time timestamp |
+| `ONCE` | `scheduled_at` | `cron_expression` | the one-time timestamp, or null after the scheduler consumes it |
 | `CRON` | nonblank `cron_expression` | `scheduled_at` | next cron occurrence |
 
-Migration `00002_require_scheduled_next_run.sql` makes `next_run_at` mandatory
-for `ONCE` and `CRON`; `MANUAL` requires it to remain null.
+Migration `00002_require_scheduled_next_run.sql` required `next_run_at` for
+`ONCE` and `CRON`. Migration `00003_allow_exhausted_once_schedule.sql` allows
+null `next_run_at` on `ONCE` only. That null means the one-time occurrence has
+been created and the job will not be selected again. `CRON` still requires
+`next_run_at`. `MANUAL` requires it to remain null.
 
-Create validates this configuration. Update merges the patch, clears fields
-that conflict with a changed schedule type, then validates and recalculates the
-next run. A scheduler that consumes `next_run_at` and creates scheduled runs is
-not implemented.
+Create and update validate through `internal/api/schedule.go` and
+`internal/schedule`. An update of an exhausted `ONCE` job still requires a
+future `scheduled_at`, because the API recomputes `next_run_at` from the merged
+schedule. The scheduler is the only writer that stores a null `next_run_at` on
+an existing `ONCE` job.
+
+## Scheduler occurrence
+
+`cmd/schedular` polls `next_run_at <= now`. Each poll locks a batch with
+`FOR UPDATE SKIP LOCKED`, then for each locked job, in a savepoint:
+
+| Schedule | Run written | `next_run_at` after commit |
+| --- | --- | --- |
+| `ONCE` | one `QUEUED` run, `trigger_source = SCHEDULED`, `scheduled_for` equal to the due `next_run_at` | null (exhausted) |
+| `CRON` | same run shape | the next tick strictly after poll time, in the job timezone |
+| anything else, or a cron/timezone the shared parser rejects | no run and no outbox row | unchanged; the job stays due |
+
+The same transaction inserts one `PENDING` `JOB_DISPATCH` outbox row whose
+message is `{"run_id":"<persisted run id>"}`. A unique `(job_id, scheduled_for)`
+index for `SCHEDULED` runs, plus the outbox existence check, makes a retried
+occurrence idempotent. A failed savepoint does not undo other jobs in the
+batch. No scheduler state is stored on the job beyond `next_run_at`.
+
+### Scheduler configuration
+
+`cmd/schedular` loads its settings with `config.NewSchedulerConfig()`. Koanf
+applies defaults, then reads `SCHEDULER_*` environment overrides and validates
+the result. Scheduler settings are separate from the database config used by
+the API.
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `SCHEDULER_INTERVAL` | `5s` | Delay between polling passes |
+| `SCHEDULER_BATCH_SIZE` | `100` | Maximum due job rows locked per pass |
+| `SCHEDULER_SHUTDOWN_GRACE` | `10s` | Shutdown deadline for the health HTTP server |
+| `SCHEDULER_HEALTH_ADDRESS` | `:8081` | Listen address for `/healthz` |
+
+Durations use Go duration syntax. The interval, batch size, and shutdown grace
+must be positive; the batch size must fit in a signed 32-bit integer. The health
+address cannot be blank. `internal/config/.env.example` lists these settings,
+but dotenv files are not loaded automatically.
 
 ## Job and trigger idempotency
 
@@ -41,14 +82,15 @@ keys when requests race.
 ## Run lifecycle
 
 Persisted run statuses are constrained by the `job_runs.status` check in the
-initial migration. `MANUAL` trigger creates `QUEUED`; a scheduled-run producer
-may create `SCHEDULED`. The implemented claim query permits `QUEUED`,
-`SCHEDULED`, or `RETRY_WAIT` to become `RUNNING`.
+initial migration. Manual trigger and the scheduler both create `QUEUED`.
+`SCHEDULED` remains a schema value with no writer in this repository. The
+implemented claim query permits `QUEUED`, `SCHEDULED`, or `RETRY_WAIT` to
+become `RUNNING`.
 
 | From | To | Current owner / condition |
 | --- | --- | --- |
 | `QUEUED` | `RUNNING` | Worker claim query; worker is not included |
-| `SCHEDULED` | `RUNNING` | Worker claim query; scheduler is not included |
+| `SCHEDULED` | `RUNNING` | Worker claim query; no code inserts `SCHEDULED` |
 | `RETRY_WAIT` | `RUNNING` | Worker claim query; retry producer is not included |
 | `QUEUED`, `SCHEDULED`, `RETRY_WAIT` | `CANCELLED` | Implemented by cancel API |
 | `RUNNING` | `CANCEL_REQUESTED` | Implemented by cancel API |
@@ -74,8 +116,7 @@ job snapshots and edits. Claim execution is not currently wired to a worker.
 ## Outbox delivery
 
 The schema in `00001_initial_schema.sql` allows `PENDING`, `INFLIGHT`, and
-`PUBLISHED`. Current trigger code
-only inserts `PENDING`. The intended relay lifecycle is:
+`PUBLISHED`. Manual trigger and the scheduler insert `PENDING` only. The intended relay lifecycle is:
 
 ```text
 PENDING -> INFLIGHT -> PUBLISHED
@@ -102,4 +143,8 @@ producer, resolver, or API route is currently implemented.
   explicit read-only/idempotent branches.
 - The API process moves **serving → draining** on SIGINT/SIGTERM. Draining
   rejects new requests while in-flight handlers finish within the grace period.
+- The scheduler process moves **polling → stopped** on SIGINT/SIGTERM. The
+  in-flight poll uses the cancelled context, then the health server shuts down
+  within `SCHEDULER_SHUTDOWN_GRACE`. A failed health listener also stops the
+  process. There is no separate scheduler lifecycle row.
 

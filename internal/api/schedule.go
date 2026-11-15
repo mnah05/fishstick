@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/fishstick/internal/database/sqlc"
-	"github.com/robfig/cron/v3"
+	"github.com/fishstick/internal/schedule"
 )
 
 const (
@@ -58,8 +58,6 @@ func ScheduleFromJob(job sqlc.Job) Schedule {
 	}
 }
 
-var cronParser = cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
-
 // NextRun validates the schedule and returns the value for jobs.next_run_at.
 // MANUAL returns an invalid NullTime.
 func (s Schedule) NextRun(now time.Time) (sql.NullTime, error) {
@@ -95,12 +93,11 @@ func (s Schedule) NextRun(now time.Time) (sql.NullTime, error) {
 		if isBlank(s.CronExpression) {
 			return sql.NullTime{}, fmt.Errorf("cron_expression is required when schedule_type is CRON")
 		}
-		parsed, err := cronParser.Parse(*s.CronExpression)
+		next, err := schedule.NextCron(*s.CronExpression, location.String(), now)
 		if err != nil {
 			return sql.NullTime{}, fmt.Errorf("invalid cron_expression")
 		}
-		next := parsed.Next(now.In(location))
-		return sql.NullTime{Time: next.UTC(), Valid: true}, nil
+		return sql.NullTime{Time: next, Valid: true}, nil
 	default:
 		return sql.NullTime{}, fmt.Errorf("schedule_type must be MANUAL, ONCE, or CRON")
 	}

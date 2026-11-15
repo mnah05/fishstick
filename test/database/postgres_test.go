@@ -3,13 +3,13 @@ package database_test
 import (
 	"context"
 	"errors"
-	"github.com/fishstick/internal/database"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/fishstick/internal/config"
+	"github.com/fishstick/internal/database"
 	"github.com/fishstick/internal/database/sqlc"
+	"github.com/fishstick/internal/testsupport"
 )
 
 func TestNewPostgresRejectsMissingConfig(t *testing.T) {
@@ -20,10 +20,7 @@ func TestNewPostgresRejectsMissingConfig(t *testing.T) {
 }
 
 func TestPostgresIntegration(t *testing.T) {
-	url := os.Getenv("TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("set TEST_DATABASE_URL to run against PostgreSQL")
-	}
+	url := testsupport.DatabaseURL(t)
 	cfg := &config.Config{
 		DatabaseURL:             url,
 		DatabaseMaxOpenConns:    2,

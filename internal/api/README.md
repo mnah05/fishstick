@@ -38,7 +38,7 @@ Send a JSON object containing `name`, `event_type`, and `schedule_type`.
 | Schedule | Validation and stored next run |
 | --- | --- |
 | `MANUAL` | No scheduled timestamp or nonblank cron expression; `next_run_at` is null |
-| `ONCE` | Future `scheduled_at` required; no nonblank cron expression; next run equals that timestamp |
+| `ONCE` | Future `scheduled_at` required; no nonblank cron expression; next run equals that timestamp. After the scheduler fires it, `next_run_at` is null until a later update supplies a new future `scheduled_at`. |
 | `CRON` | Cron expression required; no scheduled timestamp; next run is computed in the selected timezone |
 
 Cron accepts five-field expressions and descriptors supported by `robfig/cron`.

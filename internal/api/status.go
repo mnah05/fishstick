@@ -1,15 +1,6 @@
 package api
 
-const (
-	RunStatusScheduled       = "SCHEDULED"
-	RunStatusQueued          = "QUEUED"
-	RunStatusRunning         = "RUNNING"
-	RunStatusRetryWait       = "RETRY_WAIT"
-	RunStatusCancelRequested = "CANCEL_REQUESTED"
-	RunStatusSucceeded       = "SUCCEEDED"
-	RunStatusFailed          = "FAILED"
-	RunStatusCancelled       = "CANCELLED"
-)
+import "github.com/fishstick/internal/runstatus"
 
 type cancelDisposition uint8
 
@@ -21,22 +12,20 @@ const (
 	cancelTerminal
 )
 
-// runStatusCancellation is the API's single run-status registry. It drives
-// query validation and the cancellation behavior for every persisted status.
+// runStatusCancellation assigns API cancellation behavior to every status in
+// the authoritative internal/runstatus package.
 var runStatusCancellation = map[string]cancelDisposition{
-	RunStatusScheduled:       cancelImmediately,
-	RunStatusQueued:          cancelImmediately,
-	RunStatusRunning:         cancelCooperatively,
-	RunStatusRetryWait:       cancelImmediately,
-	RunStatusCancelRequested: cancelAlreadyRequested,
-	RunStatusSucceeded:       cancelTerminal,
-	RunStatusFailed:          cancelTerminal,
-	RunStatusCancelled:       cancelTerminal,
+	runstatus.Queued:          cancelImmediately,
+	runstatus.Running:         cancelCooperatively,
+	runstatus.RetryWait:       cancelImmediately,
+	runstatus.CancelRequested: cancelAlreadyRequested,
+	runstatus.Succeeded:       cancelTerminal,
+	runstatus.Failed:          cancelTerminal,
+	runstatus.Cancelled:       cancelTerminal,
 }
 
 func isValidRunStatus(value string) bool {
-	_, ok := runStatusCancellation[value]
-	return ok
+	return runstatus.Valid(value)
 }
 
 func cancelDispositionFor(status string) cancelDisposition {

@@ -4,10 +4,10 @@
 configuration to `database.NewPostgres`. Koanf loads defaults, overrides them
 with `DATABASE_*` environment variables, and validates the result.
 
-The scheduler uses `NewSchedulerConfig()` for its own typed settings. It loads
-defaults, applies `SCHEDULER_*` environment overrides through Koanf, and checks
-that durations and the batch size are positive and the health address is set.
-The API does not need scheduler configuration.
+The scheduler, relay, and worker each load separate typed settings using
+`SCHEDULER_*`, `RELAY_*`, and `WORKER_*` variables. Their poll, lease, queue,
+and shutdown values are validated independently from database settings. The API
+does not need process-specific configuration.
 
 Export the variables shown in `.env.example` before starting the application.
 Dotenv files are not loaded automatically. The example connection URL is for

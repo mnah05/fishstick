@@ -7,10 +7,91 @@ package sqlc
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 
 	"github.com/google/uuid"
 )
+
+const claimOutboxBatch = `-- name: ClaimOutboxBatch :many
+WITH candidates AS (
+    SELECT id
+    FROM outbox_events
+    WHERE event_kind = 'JOB_DISPATCH'
+      AND available_at <= NOW()
+      AND (status = 'PENDING' OR (status = 'INFLIGHT' AND locked_until < NOW()))
+    ORDER BY created_at, id
+    FOR UPDATE SKIP LOCKED
+    LIMIT $3
+)
+UPDATE outbox_events AS o
+SET status = 'INFLIGHT', locked_by = $1,
+    locked_until = NOW() + make_interval(secs => $2::int)
+FROM candidates
+WHERE o.id = candidates.id
+RETURNING o.id, o.run_id, o.event_kind, o.message, o.status, o.publish_attempts, o.available_at, o.locked_by, o.locked_until, o.published_at, o.last_error, o.created_at
+`
+
+type ClaimOutboxBatchParams struct {
+	LockedBy    sql.NullString
+	LockSeconds int32
+	BatchSize   int32
+}
+
+func (q *Queries) ClaimOutboxBatch(ctx context.Context, arg ClaimOutboxBatchParams) ([]OutboxEvent, error) {
+	rows, err := q.db.QueryContext(ctx, claimOutboxBatch, arg.LockedBy, arg.LockSeconds, arg.BatchSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []OutboxEvent{}
+	for rows.Next() {
+		var i OutboxEvent
+		if err := rows.Scan(
+			&i.ID,
+			&i.RunID,
+			&i.EventKind,
+			&i.Message,
+			&i.Status,
+			&i.PublishAttempts,
+			&i.AvailableAt,
+			&i.LockedBy,
+			&i.LockedUntil,
+			&i.PublishedAt,
+			&i.LastError,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const completeOutboxPublish = `-- name: CompleteOutboxPublish :execrows
+UPDATE outbox_events SET status = 'PUBLISHED', published_at = NOW(),
+    locked_by = NULL, locked_until = NULL, last_error = NULL
+WHERE id = $1 AND status = 'INFLIGHT' AND locked_by = $2
+`
+
+type CompleteOutboxPublishParams struct {
+	ID       uuid.UUID
+	LockedBy sql.NullString
+}
+
+func (q *Queries) CompleteOutboxPublish(ctx context.Context, arg CompleteOutboxPublishParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, completeOutboxPublish, arg.ID, arg.LockedBy)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
 
 const createOutboxRecord = `-- name: CreateOutboxRecord :one
 INSERT INTO outbox_events (
@@ -46,4 +127,142 @@ func (q *Queries) CreateOutboxRecord(ctx context.Context, arg CreateOutboxRecord
 		&i.CreatedAt,
 	)
 	return i, err
+}
+
+const getDeadLetter = `-- name: GetDeadLetter :one
+SELECT run_id, job_id, failure_reason, last_error, attempt_count, failed_at, resolution_status, resolved_at, retry_run_id, raw_message FROM dead_letter_jobs WHERE run_id = $1
+`
+
+func (q *Queries) GetDeadLetter(ctx context.Context, runID uuid.UUID) (DeadLetterJob, error) {
+	row := q.db.QueryRowContext(ctx, getDeadLetter, runID)
+	var i DeadLetterJob
+	err := row.Scan(
+		&i.RunID,
+		&i.JobID,
+		&i.FailureReason,
+		&i.LastError,
+		&i.AttemptCount,
+		&i.FailedAt,
+		&i.ResolutionStatus,
+		&i.ResolvedAt,
+		&i.RetryRunID,
+		&i.RawMessage,
+	)
+	return i, err
+}
+
+const insertDeadLetter = `-- name: InsertDeadLetter :exec
+INSERT INTO dead_letter_jobs (run_id, job_id, failure_reason, last_error, attempt_count)
+SELECT id, job_id, 'MAX_ATTEMPTS_EXCEEDED', last_error, attempt_count
+FROM job_runs WHERE id = $1
+ON CONFLICT (run_id) DO NOTHING
+`
+
+func (q *Queries) InsertDeadLetter(ctx context.Context, runID uuid.UUID) error {
+	_, err := q.db.ExecContext(ctx, insertDeadLetter, runID)
+	return err
+}
+
+const insertRetryDispatch = `-- name: InsertRetryDispatch :exec
+INSERT INTO outbox_events (id, run_id, event_kind, status, message, available_at)
+SELECT $1, r.id, 'JOB_DISPATCH', 'PENDING',
+       jsonb_build_object('run_id', r.id), r.retry_at
+FROM job_runs r
+WHERE r.id = $2 AND r.status = 'RETRY_WAIT'
+`
+
+type InsertRetryDispatchParams struct {
+	ID    uuid.UUID
+	RunID uuid.UUID
+}
+
+func (q *Queries) InsertRetryDispatch(ctx context.Context, arg InsertRetryDispatchParams) error {
+	_, err := q.db.ExecContext(ctx, insertRetryDispatch, arg.ID, arg.RunID)
+	return err
+}
+
+const listDeadLetterPage = `-- name: ListDeadLetterPage :many
+SELECT run_id, job_id, failure_reason, last_error, attempt_count, failed_at, resolution_status, resolved_at, retry_run_id, raw_message FROM dead_letter_jobs
+WHERE ($1::text IS NULL OR resolution_status = $1)
+  AND ($2::uuid IS NULL OR job_id = $2)
+  AND ($3::uuid IS NULL OR run_id = $3)
+  AND ($4::timestamptz IS NULL OR (failed_at, run_id) < ($4::timestamptz, $5::uuid))
+ORDER BY failed_at DESC, run_id DESC LIMIT $6
+`
+
+type ListDeadLetterPageParams struct {
+	ResolutionStatus sql.NullString
+	JobID            uuid.NullUUID
+	RunID            uuid.NullUUID
+	Cursor           sql.NullTime
+	CursorRunID      uuid.NullUUID
+	Limit            int32
+}
+
+func (q *Queries) ListDeadLetterPage(ctx context.Context, arg ListDeadLetterPageParams) ([]DeadLetterJob, error) {
+	rows, err := q.db.QueryContext(ctx, listDeadLetterPage,
+		arg.ResolutionStatus,
+		arg.JobID,
+		arg.RunID,
+		arg.Cursor,
+		arg.CursorRunID,
+		arg.Limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []DeadLetterJob{}
+	for rows.Next() {
+		var i DeadLetterJob
+		if err := rows.Scan(
+			&i.RunID,
+			&i.JobID,
+			&i.FailureReason,
+			&i.LastError,
+			&i.AttemptCount,
+			&i.FailedAt,
+			&i.ResolutionStatus,
+			&i.ResolvedAt,
+			&i.RetryRunID,
+			&i.RawMessage,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const releaseOutboxClaim = `-- name: ReleaseOutboxClaim :execrows
+UPDATE outbox_events SET status = 'PENDING', publish_attempts = publish_attempts + 1,
+    available_at = NOW() + make_interval(secs => $1::int),
+    locked_by = NULL, locked_until = NULL, last_error = $2
+WHERE id = $3 AND status = 'INFLIGHT' AND locked_by = $4
+`
+
+type ReleaseOutboxClaimParams struct {
+	DelaySeconds int32
+	LastError    sql.NullString
+	ID           uuid.UUID
+	LockedBy     sql.NullString
+}
+
+func (q *Queries) ReleaseOutboxClaim(ctx context.Context, arg ReleaseOutboxClaimParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, releaseOutboxClaim,
+		arg.DelaySeconds,
+		arg.LastError,
+		arg.ID,
+		arg.LockedBy,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }

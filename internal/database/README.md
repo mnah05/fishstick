@@ -5,7 +5,7 @@
 From the project root:
 
 ```sh
-docker compose up -d
+docker compose -f .docker/docker-compose.yml up -d postgres
 export DATABASE_URL='postgres://postgres:postgres@localhost:5432/fishstick?sslmode=disable'
 
 # Schema (goose migrations)
@@ -22,8 +22,8 @@ goose -dir internal/database/migrations postgres "$DATABASE_URL" down     # roll
 ## Reset everything
 
 ```sh
-docker compose down -v
-docker compose up -d
+docker compose -f .docker/docker-compose.yml down -v
+docker compose -f .docker/docker-compose.yml up -d postgres
 export DATABASE_URL='postgres://postgres:postgres@localhost:5432/fishstick?sslmode=disable'
 goose -dir internal/database/migrations postgres "$DATABASE_URL" up
 ```
@@ -35,6 +35,24 @@ sqlc and the integration tests both use the migration files; do not maintain a s
 ```sh
 go run ./cmd/api
 ```
+
+## Run the execution pipeline
+
+Start both databases, migrate Postgres as above, and use one terminal for each
+process:
+
+```sh
+docker compose -f .docker/docker-compose.yml --profile messaging up -d
+go run ./cmd/api
+go run ./cmd/schedular
+go run ./cmd/relay
+go run ./cmd/worker
+```
+
+Set `RELAY_RABBIT_URL` and `WORKER_RABBIT_URL` if the local broker credentials
+or address differ from the example values. The worker's built-in development
+handler returns an empty result for every event type; replace it before running
+real jobs.
 
 ## Integration tests
 
@@ -53,6 +71,9 @@ and rollback, snapshot preservation, concurrent updates/triggers,
 claim-then-update / update-then-claim interleaving, and the worker-claim locking
 protocol. Without `TEST_DATABASE_URL`, integration tests skip.
 
-Compose starts PostgreSQL 16 only. It does not start RabbitMQ, the API, an outbox
-relay, a scheduler, or workers. The schema supports those future components;
-currently manual triggering writes `QUEUED` runs and `PENDING` outbox events.
+Compose starts PostgreSQL 16 by default. RabbitMQ is an optional development
+dependency; start it with `docker compose -f .docker/docker-compose.yml --profile messaging up -d`.
+Both relay and worker fail at startup with a clear error if the broker is
+unreachable. The relay declares the durable worker queue and binding so
+messages remain available before workers start. Manual triggering and the scheduler write
+`QUEUED` runs and `PENDING` outbox events for the relay.

@@ -356,8 +356,8 @@ func seedJob(t *testing.T, db *sql.DB, scheduleType string, nextRun time.Time, e
 	_, err := db.Exec(`
 		INSERT INTO jobs (
 			id, name, event_type, payload, schedule_type, scheduled_at,
-			cron_expression, timezone, next_run_at, max_attempts, timeout_seconds
-		) VALUES ($1, $2, 'test.event', '{"ok":true}', $3, $4, $5, $6, $7, 3, 120)`,
+			cron_expression, timezone, next_run_at, max_attempts, retry_delay_seconds, timeout_seconds
+		) VALUES ($1, $2, 'test.event', '{"ok":true}', $3, $4, $5, $6, $7, 3, 17, 120)`,
 		id, "scheduler test "+id.String(), scheduleType, scheduledAt, cronExpression, timezone, nextRun)
 	if err != nil {
 		t.Fatal(err)
@@ -370,9 +370,10 @@ func assertScheduledOccurrence(t *testing.T, db *sql.DB, jobID uuid.UUID, schedu
 	var runID uuid.UUID
 	var source, status string
 	var gotScheduledFor, gotCreatedAt time.Time
+	var retryDelaySeconds int32
 	if err := db.QueryRow(`
-		SELECT id, trigger_source, status, scheduled_for, created_at
-		FROM job_runs WHERE job_id = $1`, jobID).Scan(&runID, &source, &status, &gotScheduledFor, &gotCreatedAt); err != nil {
+		SELECT id, trigger_source, status, scheduled_for, created_at, retry_delay_seconds
+		FROM job_runs WHERE job_id = $1`, jobID).Scan(&runID, &source, &status, &gotScheduledFor, &gotCreatedAt, &retryDelaySeconds); err != nil {
 		t.Fatal(err)
 	}
 	if source != "SCHEDULED" || status != "QUEUED" || !gotScheduledFor.Equal(scheduledFor) {
@@ -380,6 +381,9 @@ func assertScheduledOccurrence(t *testing.T, db *sql.DB, jobID uuid.UUID, schedu
 	}
 	if !gotCreatedAt.Equal(createdAt) {
 		t.Fatalf("run created_at = %s, want %s", gotCreatedAt, createdAt)
+	}
+	if retryDelaySeconds != 17 {
+		t.Fatalf("run retry_delay_seconds=%d, want job snapshot 17", retryDelaySeconds)
 	}
 	var eventRunID uuid.UUID
 	var eventKind, eventStatus string

@@ -1,10 +1,15 @@
-# Planned HTTP endpoints (not implemented)
+# Dead-letter queue API
 
-Dead-letter queue introspection — **not wired yet**. Likely shapes for a later iteration:
+The dead-letter introspection endpoints are implemented:
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/v1/dlq` | Paginated list of rows in `dead_letter_jobs` (filter by resolution, job, run id). |
-| GET | `/v1/dlq/:run_id` | Single DLQ entry by `run_id` (joined with job/run context as needed). |
+| GET | `/v1/dlq` | Paginated list; supports `resolution_status`, `job_id`, and `run_id` filters. |
+| GET | `/v1/dlq/:run_id` | Read one entry by run ID. |
 
-Schema reference: `dead_letter_jobs` in [`internal/database/migrations/00001_initial_schema.sql`](../internal/database/migrations/00001_initial_schema.sql).
+List responses use `data` and optional `next_cursor`, matching other list
+endpoints. The cursor is opaque and should be passed back unchanged.
+
+The worker inserts an `OPEN` entry in the same transaction that marks a run
+`FAILED` after its configured attempts are exhausted. This MVP exposes reads;
+manual resolution and retry linkage remain follow-up work.

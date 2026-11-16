@@ -75,6 +75,7 @@ type JobRun struct {
 	Result                sql.Null[[]byte]
 	CreatedAt             time.Time
 	UpdatedAt             time.Time
+	RetryDelaySeconds     int32
 }
 
 type OutboxEvent struct {

@@ -11,6 +11,11 @@ pool. Start with [the local setup guide](../cmd/api/README.md).
 | `database` | Open the pool, apply embedded goose migrations, load development fixtures |
 | `database/sqlc` | Generated queries and database models |
 | `api` | Routes, validation, response mapping, and update/trigger transactions |
+| `runstatus` | Persisted run-status registry and state predicates |
+
+The runnable processes are `cmd/api`, `cmd/schedular`, `cmd/relay`, and
+`cmd/worker`. RabbitMQ transport settings are process-specific; PostgreSQL
+settings are shared through `DATABASE_*`.
 
 `cmd/api/main.go` loads configuration, opens the pool, checks connectivity, and
 passes `db` to `api.NewRouter(db)`. The router creates its own `sqlc.Queries`.
@@ -18,9 +23,10 @@ The update and trigger handlers also receive the pool to start transactions and 
 queries with `queries.WithTx(tx)`. Shutdown drains HTTP requests before closing
 the pool.
 
-Job creation stores definitions and scheduling metadata. Manual triggering
-stores a run and dispatch event. Automatic scheduling, outbox publishing,
-RabbitMQ consumers, and execution workers are not implemented.
+Job creation stores definitions and scheduling metadata. The scheduler writes
+scheduled occurrences, the relay publishes outbox messages, and the worker
+claims and completes runs. The worker's default development handler returns an
+empty result; deployments should register event-specific handlers.
 
 ## Development
 

@@ -126,7 +126,7 @@ func (s *server) triggerJob(c echo.Context) error {
 		TriggerIdempotencyKey: sql.NullString{String: key, Valid: true},
 		TriggerRequestHash:    sql.NullString{String: hash, Valid: true},
 		EventTypeSnapshot:     job.EventType, PayloadSnapshot: job.Payload,
-		TimeoutSeconds: job.TimeoutSeconds, MaxAttempts: job.MaxAttempts,
+		TimeoutSeconds: job.TimeoutSeconds, RetryDelaySeconds: job.RetryDelaySeconds, MaxAttempts: job.MaxAttempts,
 	})
 	if err != nil {
 		return writeAPIError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to create job run", nil)

@@ -37,6 +37,8 @@ func newRouter(db *sql.DB, testMode bool) *echo.Echo {
 	v1.POST("/cancel_run/:run_id", s.cancelRun)
 	v1.POST("/job/update/:job_id", s.updateJob)
 	v1.POST("/job/trigger/:job_id", s.triggerJob)
+	v1.GET("/dlq", s.listDeadLetters)
+	v1.GET("/dlq/:run_id", s.getDeadLetter)
 
 	return e
 }

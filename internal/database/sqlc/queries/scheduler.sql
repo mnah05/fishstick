@@ -2,7 +2,7 @@
 -- Lock only the due job definitions this poll will handle. SKIP LOCKED lets
 -- multiple scheduler processes divide the work without waiting on each other.
 SELECT id, event_type, payload, schedule_type, cron_expression, timezone,
-       next_run_at, max_attempts, timeout_seconds
+       next_run_at, max_attempts, retry_delay_seconds, timeout_seconds
 FROM jobs
 WHERE next_run_at <= sqlc.arg('now')
 ORDER BY next_run_at, id
@@ -13,9 +13,9 @@ FOR UPDATE SKIP LOCKED;
 -- The partial unique index makes one row per scheduled occurrence authoritative.
 INSERT INTO job_runs (
     id, job_id, scheduled_for, trigger_source, event_type_snapshot,
-    payload_snapshot, timeout_seconds, max_attempts, status, attempt_count, created_at
+    payload_snapshot, timeout_seconds, retry_delay_seconds, max_attempts, status, attempt_count, created_at
 )
-VALUES ($1, $2, $3, 'SCHEDULED', $4, $5, $6, $7, 'QUEUED', 0, $8)
+VALUES ($1, $2, $3, 'SCHEDULED', $4, $5, $6, $7, $8, 'QUEUED', 0, $9)
 ON CONFLICT (job_id, scheduled_for) WHERE trigger_source = 'SCHEDULED' DO NOTHING;
 
 -- name: GetScheduledRunID :one

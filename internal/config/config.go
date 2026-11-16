@@ -30,6 +30,63 @@ type SchedulerConfig struct {
 	HealthAddress string        `koanf:"health_address"`
 }
 
+type RelayConfig struct {
+	Interval      time.Duration `koanf:"interval"`
+	BatchSize     int           `koanf:"batch_size"`
+	LockTTL       time.Duration `koanf:"lock_ttl"`
+	ShutdownGrace time.Duration `koanf:"shutdown_grace"`
+	RabbitURL     string        `koanf:"rabbit_url"`
+	Exchange      string        `koanf:"exchange"`
+	Queue         string        `koanf:"queue"`
+	RoutingKey    string        `koanf:"routing_key"`
+	WorkerID      string        `koanf:"worker_id"`
+}
+type WorkerConfig struct {
+	LeaseDuration     time.Duration `koanf:"lease_duration"`
+	HeartbeatInterval time.Duration `koanf:"heartbeat_interval"`
+	ShutdownGrace     time.Duration `koanf:"shutdown_grace"`
+	RabbitURL         string        `koanf:"rabbit_url"`
+	Exchange          string        `koanf:"exchange"`
+	Queue             string        `koanf:"queue"`
+	RoutingKey        string        `koanf:"routing_key"`
+	Prefetch          int           `koanf:"prefetch"`
+	WorkerID          string        `koanf:"worker_id"`
+}
+
+func loadProcessConfig(prefix string, defaults map[string]any, out any) error {
+	k := koanf.New(".")
+	if err := k.Load(confmap.Provider(defaults, "."), nil); err != nil {
+		return err
+	}
+	if err := k.Load(env.Provider(prefix, ".", func(key string) string { return strings.ToLower(strings.TrimPrefix(key, prefix)) }), nil); err != nil {
+		return err
+	}
+	for key := range defaults {
+		if value, ok := k.Get(key).(string); ok && strings.TrimSpace(value) == "" {
+			return fmt.Errorf("%s%s must not be empty", prefix, strings.ToUpper(key))
+		}
+	}
+	return k.Unmarshal("", out)
+}
+
+func NewRelayConfig() (*RelayConfig, error) {
+	c := &RelayConfig{}
+	err := loadProcessConfig("RELAY_", map[string]any{"interval": "1s", "batch_size": 100, "lock_ttl": "30s", "shutdown_grace": "10s", "rabbit_url": "amqp://fishstick:fishstick@localhost:5672/", "exchange": "fishstick", "queue": "fishstick.worker", "routing_key": "job.dispatch", "worker_id": "relay-1"}, c)
+	if err == nil && (c.Interval <= 0 || c.BatchSize <= 0 || c.LockTTL <= 0 || c.ShutdownGrace <= 0 || c.Exchange == "" || c.Queue == "" || c.RoutingKey == "" || c.WorkerID == "") {
+		err = fmt.Errorf("invalid relay configuration")
+	}
+	return c, err
+}
+
+func NewWorkerConfig() (*WorkerConfig, error) {
+	c := &WorkerConfig{}
+	err := loadProcessConfig("WORKER_", map[string]any{"lease_duration": "60s", "heartbeat_interval": "15s", "shutdown_grace": "30s", "rabbit_url": "amqp://fishstick:fishstick@localhost:5672/", "exchange": "fishstick", "queue": "fishstick.worker", "routing_key": "job.dispatch", "prefetch": 1, "worker_id": "worker-1"}, c)
+	if err == nil && (c.LeaseDuration <= 0 || c.HeartbeatInterval <= 0 || c.HeartbeatInterval >= c.LeaseDuration || c.ShutdownGrace <= 0 || c.Queue == "" || c.Exchange == "" || c.RoutingKey == "" || c.Prefetch <= 0 || c.WorkerID == "") {
+		err = fmt.Errorf("invalid worker configuration")
+	}
+	return c, err
+}
+
 // defaultValues are the only defaults; the empty-override check below iterates
 // the same keys so adding a setting cannot forget one.
 var defaultValues = map[string]any{

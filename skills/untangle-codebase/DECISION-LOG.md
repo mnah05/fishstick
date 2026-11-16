@@ -27,7 +27,7 @@ Scope: fishstick MVP as described in the Notion page and current repository docs
   - The scheduler had copied the parser flags and the timezone next-tick formula from `internal/api/schedule.go`.
 - Give each due job its own savepoint inside the scheduler batch transaction.
   - One invalid cron or timezone previously rolled back every other job locked in that poll, and a permanently due bad row blocked later jobs.
-- Record the scheduler's writes in `docs/state-machines.md`: `QUEUED` plus `SCHEDULED` trigger, exhausted `ONCE` as null `next_run_at` (migration `00003`), and `SCHEDULED` run status as schema-only.
+- Record the scheduler's writes in `docs/state-machines.md`: `QUEUED` plus `SCHEDULED` trigger, exhausted `ONCE` as null `next_run_at` (migration `00003`). Migration `00004` later removed the unused `SCHEDULED` run status.
 
 ## Tests
 

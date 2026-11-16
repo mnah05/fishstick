@@ -3,8 +3,8 @@
 This document records the states and transitions currently represented by
 Fishstick. The migrations are authoritative for persisted values. API behavior
 is implemented in `internal/api`. The scheduler in `cmd/schedular` creates
-due occurrences. Worker completion, outbox relay, and dead-letter resolution
-are not part of this repository yet.
+due occurrences; `cmd/relay` publishes dispatch events and `cmd/worker` owns
+execution transitions and exhausted-run dead-letter insertion.
 
 ## Job definitions
 
@@ -81,28 +81,29 @@ keys when requests race.
 
 ## Run lifecycle
 
-Persisted run statuses are constrained by the `job_runs.status` check in the
-initial migration. Manual trigger and the scheduler both create `QUEUED`.
-`SCHEDULED` remains a schema value with no writer in this repository. The
-implemented claim query permits `QUEUED`, `SCHEDULED`, or `RETRY_WAIT` to
-become `RUNNING`.
+Persisted run statuses are constrained by the current migration. Manual
+trigger and the scheduler both create `QUEUED`. `trigger_source = 'SCHEDULED'`
+marks scheduler origin; run status `SCHEDULED` was removed because it had no
+writer.
 
 | From | To | Current owner / condition |
 | --- | --- | --- |
-| `QUEUED` | `RUNNING` | Worker claim query; worker is not included |
-| `SCHEDULED` | `RUNNING` | Worker claim query; no code inserts `SCHEDULED` |
-| `RETRY_WAIT` | `RUNNING` | Worker claim query; retry producer is not included |
-| `QUEUED`, `SCHEDULED`, `RETRY_WAIT` | `CANCELLED` | Implemented by cancel API |
+| `QUEUED`, due `RETRY_WAIT` | `RUNNING` | `cmd/worker`, after locking the job row |
+| expired `RUNNING` | `RUNNING` with a new fencing token | `cmd/worker` lease reclaim |
+| `QUEUED`, `RETRY_WAIT` | `CANCELLED` | `cmd/api` cancel endpoint |
 | `RUNNING` | `CANCEL_REQUESTED` | Implemented by cancel API |
-| `RUNNING` | `SUCCEEDED`, `FAILED`, `RETRY_WAIT`, `CANCELLED` | Worker completion; not included |
-| `CANCEL_REQUESTED` | `SUCCEEDED`, `FAILED`, `CANCELLED` | Worker completion/recovery; not included |
+| `RUNNING` | `SUCCEEDED`, `FAILED`, `RETRY_WAIT` | `cmd/worker` completion queries |
+| `CANCEL_REQUESTED` | `CANCELLED` | `cmd/worker` cooperative completion |
+| expired `CANCEL_REQUESTED` | `CANCELLED` | `cmd/worker` lease recovery |
+| failed `RUNNING` below max attempts | `RETRY_WAIT` + delayed dispatch | `cmd/worker`, same transaction |
+| exhausted `RUNNING` | `FAILED` + `OPEN` DLQ entry | `cmd/worker`, same transaction |
 
 `SUCCEEDED`, `FAILED`, and `CANCELLED` are terminal. Re-cancelling
 `CANCEL_REQUESTED` is idempotent. Cancelling a terminal run returns conflict.
 The API classification lives in `internal/api/status.go`; `CancelRun` in
 `internal/database/sqlc/queries/job_runs.sql` applies the corresponding update
-to pre-run and `RUNNING` states. Worker completion and recovery transitions
-remain intentionally absent until those components are implemented.
+to pre-run and `RUNNING` states. Worker completions require the current worker
+ID and fencing token, so stale workers cannot overwrite a later claim.
 
 ## Job update versus run claim
 
@@ -111,27 +112,29 @@ documented worker claim protocol lock the same job row. After that lock, an
 update returns `JOB_BUSY` when a `RUNNING` or `CANCEL_REQUESTED` run has no
 lease expiry or an unexpired lease; otherwise it may save the job definition.
 The claim query must keep the lock through its run status change. This serializes
-job snapshots and edits. Claim execution is not currently wired to a worker.
+job snapshots and edits. The worker uses this protocol before claiming.
 
 ## Outbox delivery
 
-The schema in `00001_initial_schema.sql` allows `PENDING`, `INFLIGHT`, and
-`PUBLISHED`. Manual trigger and the scheduler insert `PENDING` only. The intended relay lifecycle is:
+The schema allows `PENDING`, `INFLIGHT`, and `PUBLISHED`. Manual trigger and
+the scheduler insert `PENDING`; `cmd/relay` claims batches with `SKIP LOCKED`,
+publishes persistent messages with broker confirms, and records success or
+retry with bounded backoff. Expired `INFLIGHT` claims are reclaimable.
 
 ```text
 PENDING -> INFLIGHT -> PUBLISHED
               |
-              +-> PENDING (failed or expired claim, when relay is implemented)
+              +-> PENDING (publish failure, with backoff)
+INFLIGHT (expired lock) -> INFLIGHT (reclaimed by another relay)
 ```
 
-No relay currently claims, retries, or publishes events.
 
 ## Dead-letter resolution
 
 The schema in `00001_initial_schema.sql` allows `OPEN`, `RETRIED`, and
-`RESOLVED`. The intended resolution
-transitions are `OPEN -> RETRIED` or `OPEN -> RESOLVED`. No dead-letter
-producer, resolver, or API route is currently implemented.
+`RESOLVED`. `cmd/worker` writes `OPEN` when attempts are exhausted or a final
+lease expires. The API exposes list/get. `OPEN -> RETRIED` and `OPEN ->
+RESOLVED` remain unwritten because manual resolution is deferred.
 
 ## Request and process control
 

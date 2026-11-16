@@ -130,7 +130,7 @@ func TestListJobsPostgresIntegration(t *testing.T) {
 func TestUpdateJobStatesPostgresIntegration(t *testing.T) {
 	db := newIntegrationDB(t)
 	router := api.NewTestRouter(db)
-	for _, status := range []string{"", "SCHEDULED", "QUEUED", "RETRY_WAIT", "SUCCEEDED", "FAILED", "CANCELLED", "RUNNING", "CANCEL_REQUESTED"} {
+	for _, status := range []string{"", "QUEUED", "RETRY_WAIT", "SUCCEEDED", "FAILED", "CANCELLED", "RUNNING", "CANCEL_REQUESTED"} {
 		t.Run("state_"+status, func(t *testing.T) {
 			id := insertTestJob(t, db)
 			if status != "" {

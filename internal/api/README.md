@@ -7,8 +7,7 @@ There is no authentication.
 [router.go](router.go) is the authoritative route list.
 
 See [state-machines.md](../../docs/state-machines.md) for persisted state
-values, implemented transitions, and transitions that depend on components not
-included in this repository.
+values and transition owners.
 
 ## Routes
 
@@ -24,9 +23,10 @@ included in this repository.
 | POST | `/v1/cancel_run/:run_id` | `200` immediate cancel or idempotent; `202` cancel requested while running |
 | POST | `/v1/job/update/:job_id` | `200` with updated job |
 | POST | `/v1/job/trigger/:job_id` | `202` with new or existing run |
+| GET | `/v1/dlq` | `200` with filtered, paginated dead-letter entries |
+| GET | `/v1/dlq/:run_id` | `200` with one dead-letter entry (404 if missing) |
 
-Dead-letter queue HTTP routes are **not** implemented yet (see [future-endpoints.md](../docs/future-endpoints.md)).
-Neither are the scheduler, outbox relay, RabbitMQ publishing, or workers.
+The scheduler, outbox relay, and worker are separate processes.
 
 ## Create a job
 
@@ -76,7 +76,7 @@ same `limit` and `cursor` pagination as `/v1/job/list`. Optional filters (all qu
 string):
 
 - `job_id` — restrict to one job (UUID).
-- `status` — exact match; must be one of `SCHEDULED`, `QUEUED`, `RUNNING`, `RETRY_WAIT`, `CANCEL_REQUESTED`, `SUCCEEDED`, `FAILED`, `CANCELLED`.
+- `status` — exact match; must be one of `QUEUED`, `RUNNING`, `RETRY_WAIT`, `CANCEL_REQUESTED`, `SUCCEEDED`, `FAILED`, `CANCELLED`.
 - `trigger_source` — `MANUAL` or `SCHEDULED`.
 - `event_type` — matches `event_type_snapshot` on the run (exact string).
 
@@ -106,7 +106,7 @@ The handler uses a transaction, locks the run with `SELECT ... FOR UPDATE`, then
 
 | Current status | Effect | HTTP |
 | --- | --- | --- |
-| `QUEUED`, `SCHEDULED`, `RETRY_WAIT` | Set `CANCELLED`, `cancel_requested_at`, `cancelled_at`, optional `cancel_reason` | `200` |
+| `QUEUED`, `RETRY_WAIT` | Set `CANCELLED`, `cancel_requested_at`, `cancelled_at`, optional `cancel_reason` | `200` |
 | `RUNNING` | Set `CANCEL_REQUESTED`, `cancel_requested_at`, optional `cancel_reason` (worker should observe and finish) | `202` |
 | `CANCEL_REQUESTED` | No row change (idempotent) | `200` |
 | `SUCCEEDED`, `FAILED`, `CANCELLED` | Refuse | `409` with code `RUN_ALREADY_TERMINAL` |
@@ -114,7 +114,7 @@ The handler uses a transaction, locks the run with `SELECT ... FOR UPDATE`, then
 
 The run row is locked with `FOR UPDATE` before the status switch, so the conditional update always sees the same status the switch did.
 
-**Planned later (not implemented):** DLQ list/get — see [future-endpoints.md](../docs/future-endpoints.md).
+DLQ list/get are available at `GET /v1/dlq` and `GET /v1/dlq/:run_id`.
 
 ## Update a job
 
@@ -133,16 +133,18 @@ Only `RUNNING` and `CANCEL_REQUESTED` runs block updates with `409 JOB_BUSY`, an
 only while the run’s `lease_expires_at` is **NULL** (legacy or unset) or **after**
 `CURRENT_TIMESTAMP`. If a worker wrote a lease and it has expired, the run no
 longer counts as busy and updates may proceed (so stuck claims do not block edits
-forever). Queued, scheduled, retry-waiting, and terminal runs allow changes while keeping
+forever). Queued, retry-waiting, and terminal runs allow changes while keeping
 their existing snapshots. Concurrent partial updates read the latest committed
 job after acquiring its lock, preventing one update from overwriting an unrelated
 field changed by another. Triggers use the same lock, so a new run snapshots one
 consistent job version.
 
-Worker-style claims should use **`ClaimRunToRunning`** in the same transaction as
-`GetJobForUpdate`: set `lease_expires_at` and `worker_id`, and only transition from
-`QUEUED` / `SCHEDULED` / `RETRY_WAIT`. That keeps the job row lock through the
-state change so updates and claims serialize.
+Worker-style claims use **`ClaimRunToRunning`** in the same transaction as
+`GetJobForRunUpdate`: set the lease and worker owner, then lock the run. The
+claim allows `QUEUED`, due `RETRY_WAIT`, and `RUNNING` only when its old lease
+expired. Each claim increments the fencing token so a stale handler cannot
+complete after a reclaim. Keeping the job row lock through the state change
+serializes updates and claims.
 
 ## Trigger a manual run
 
@@ -159,8 +161,8 @@ The handler in [api.runs.go](api.runs.go) performs these steps:
    return `409 IDEMPOTENCY_KEY_REUSED` otherwise. Release the lock by rolling back
    the read-only transaction before responding.
 5. Allocate UUIDv7 IDs and call `ManualJobRun` to insert a `QUEUED` run with zero
-   attempts and `scheduled_for = NOW()`. Copy event type, payload, timeout, and
-   maximum attempts from the locked job.
+   attempts and `scheduled_for = NOW()`. Copy event type, payload, timeout,
+   retry delay, and maximum attempts from the locked job.
 6. Call `CreateOutboxRecord` separately to insert a `PENDING`, `JOB_DISPATCH`
    event with a message containing the run ID.
 7. Commit, then return `202` with the run. An error before commit rolls back both
@@ -177,7 +179,8 @@ Run JSON includes IDs, status, attempts, execution snapshots as `event_type` and
 `payload`, timeout, worker information, timestamps, errors, and result. Nullable
 fields become JSON null. Internal idempotency fields and the fencing token are
 not exposed. `202` means the run and event are persisted, not that execution has
-started. Events stay pending until a relay is implemented.
+started. The relay publishes the event; the worker then claims and executes the
+snapshot.
 
 ## Health and errors
 

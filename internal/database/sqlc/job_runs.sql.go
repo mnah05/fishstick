@@ -23,8 +23,8 @@ SET
         ELSE $2::timestamptz END,
     cancel_reason = COALESCE($3::text, cancel_reason)
 WHERE id = $1
-  AND status IN ('QUEUED', 'SCHEDULED', 'RETRY_WAIT', 'RUNNING')
-RETURNING id, job_id, retry_of_run_id, scheduled_for, trigger_source, trigger_idempotency_key, trigger_request_hash, event_type_snapshot, payload_snapshot, timeout_seconds, status, attempt_count, max_attempts, worker_id, fencing_token, lease_expires_at, heartbeat_at, retry_at, deadline_at, started_at, last_attempt_started_at, finished_at, cancel_requested_at, cancelled_at, cancel_reason, last_error, exit_code, result, created_at, updated_at
+  AND status IN ('QUEUED', 'RETRY_WAIT', 'RUNNING')
+RETURNING id, job_id, retry_of_run_id, scheduled_for, trigger_source, trigger_idempotency_key, trigger_request_hash, event_type_snapshot, payload_snapshot, timeout_seconds, status, attempt_count, max_attempts, worker_id, fencing_token, lease_expires_at, heartbeat_at, retry_at, deadline_at, started_at, last_attempt_started_at, finished_at, cancel_requested_at, cancelled_at, cancel_reason, last_error, exit_code, result, created_at, updated_at, retry_delay_seconds
 `
 
 type CancelRunParams struct {
@@ -69,6 +69,7 @@ func (q *Queries) CancelRun(ctx context.Context, arg CancelRunParams) (JobRun, e
 		&i.Result,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.RetryDelaySeconds,
 	)
 	return i, err
 }
@@ -78,12 +79,20 @@ UPDATE job_runs
 SET
     status = 'RUNNING',
     started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
+    last_attempt_started_at = CURRENT_TIMESTAMP,
+    heartbeat_at = CURRENT_TIMESTAMP,
     lease_expires_at = $3,
-    worker_id = $4
+    worker_id = $4,
+    fencing_token = fencing_token + 1,
+    attempt_count = attempt_count + 1,
+    retry_at = NULL
 WHERE id = $1
   AND job_id = $2
-  AND status IN ('QUEUED', 'SCHEDULED', 'RETRY_WAIT')
-RETURNING id, job_id, retry_of_run_id, scheduled_for, trigger_source, trigger_idempotency_key, trigger_request_hash, event_type_snapshot, payload_snapshot, timeout_seconds, status, attempt_count, max_attempts, worker_id, fencing_token, lease_expires_at, heartbeat_at, retry_at, deadline_at, started_at, last_attempt_started_at, finished_at, cancel_requested_at, cancelled_at, cancel_reason, last_error, exit_code, result, created_at, updated_at
+  AND attempt_count < max_attempts
+  AND ((status IN ('QUEUED', 'RETRY_WAIT') AND (status <> 'RETRY_WAIT' OR retry_at <= NOW()))
+       OR (status = 'RUNNING' AND (lease_expires_at IS NULL OR lease_expires_at < NOW())))
+  AND (status <> 'RETRY_WAIT' OR retry_at <= NOW())
+RETURNING id, job_id, retry_of_run_id, scheduled_for, trigger_source, trigger_idempotency_key, trigger_request_hash, event_type_snapshot, payload_snapshot, timeout_seconds, status, attempt_count, max_attempts, worker_id, fencing_token, lease_expires_at, heartbeat_at, retry_at, deadline_at, started_at, last_attempt_started_at, finished_at, cancel_requested_at, cancelled_at, cancel_reason, last_error, exit_code, result, created_at, updated_at, retry_delay_seconds
 `
 
 type ClaimRunToRunningParams struct {
@@ -93,7 +102,7 @@ type ClaimRunToRunningParams struct {
 	WorkerID       sql.NullString
 }
 
-// Worker claim: must run after locking the job row (same transaction as GetJobForUpdate).
+// Worker claim: must run after locking the job row (same transaction as GetJobForRunUpdate).
 func (q *Queries) ClaimRunToRunning(ctx context.Context, arg ClaimRunToRunningParams) (JobRun, error) {
 	row := q.db.QueryRowContext(ctx, claimRunToRunning,
 		arg.ID,
@@ -133,12 +142,180 @@ func (q *Queries) ClaimRunToRunning(ctx context.Context, arg ClaimRunToRunningPa
 		&i.Result,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.RetryDelaySeconds,
+	)
+	return i, err
+}
+
+const completeExpiredRunCancelled = `-- name: CompleteExpiredRunCancelled :execrows
+UPDATE job_runs SET status = 'CANCELLED', finished_at = NOW(), cancelled_at = NOW(),
+    lease_expires_at = NULL, worker_id = NULL
+WHERE id = $1 AND status = 'CANCEL_REQUESTED'
+  AND (lease_expires_at IS NULL OR lease_expires_at < NOW())
+`
+
+func (q *Queries) CompleteExpiredRunCancelled(ctx context.Context, id uuid.UUID) (int64, error) {
+	result, err := q.db.ExecContext(ctx, completeExpiredRunCancelled, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const completeRunCancelled = `-- name: CompleteRunCancelled :execrows
+UPDATE job_runs SET status = 'CANCELLED', finished_at = NOW(), cancelled_at = NOW(),
+    lease_expires_at = NULL, worker_id = NULL
+WHERE id = $1 AND status = 'CANCEL_REQUESTED'
+  AND worker_id = $2 AND fencing_token = $3
+`
+
+type CompleteRunCancelledParams struct {
+	ID           uuid.UUID
+	WorkerID     sql.NullString
+	FencingToken int64
+}
+
+func (q *Queries) CompleteRunCancelled(ctx context.Context, arg CompleteRunCancelledParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, completeRunCancelled, arg.ID, arg.WorkerID, arg.FencingToken)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const completeRunFailed = `-- name: CompleteRunFailed :execrows
+UPDATE job_runs SET status = 'FAILED', last_error = $1,
+    exit_code = $2, finished_at = NOW(), lease_expires_at = NULL,
+    worker_id = NULL
+WHERE id = $3 AND status = 'RUNNING'
+  AND worker_id = $4 AND fencing_token = $5
+`
+
+type CompleteRunFailedParams struct {
+	LastError    sql.NullString
+	ExitCode     sql.NullInt32
+	ID           uuid.UUID
+	WorkerID     sql.NullString
+	FencingToken int64
+}
+
+func (q *Queries) CompleteRunFailed(ctx context.Context, arg CompleteRunFailedParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, completeRunFailed,
+		arg.LastError,
+		arg.ExitCode,
+		arg.ID,
+		arg.WorkerID,
+		arg.FencingToken,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const completeRunSucceeded = `-- name: CompleteRunSucceeded :execrows
+UPDATE job_runs SET status = 'SUCCEEDED', result = $1::jsonb,
+    finished_at = NOW(), lease_expires_at = NULL, worker_id = NULL
+WHERE id = $2 AND status = 'RUNNING'
+  AND worker_id = $3 AND fencing_token = $4
+`
+
+type CompleteRunSucceededParams struct {
+	Result       sql.Null[[]byte]
+	ID           uuid.UUID
+	WorkerID     sql.NullString
+	FencingToken int64
+}
+
+func (q *Queries) CompleteRunSucceeded(ctx context.Context, arg CompleteRunSucceededParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, completeRunSucceeded,
+		arg.Result,
+		arg.ID,
+		arg.WorkerID,
+		arg.FencingToken,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const failExpiredRun = `-- name: FailExpiredRun :execrows
+UPDATE job_runs SET status = 'FAILED',
+    last_error = COALESCE(last_error, 'worker lease expired after max attempts'),
+    finished_at = NOW(), lease_expires_at = NULL, worker_id = NULL
+WHERE id = $1 AND status = 'RUNNING'
+  AND (lease_expires_at IS NULL OR lease_expires_at < NOW())
+  AND attempt_count >= max_attempts
+`
+
+func (q *Queries) FailExpiredRun(ctx context.Context, id uuid.UUID) (int64, error) {
+	result, err := q.db.ExecContext(ctx, failExpiredRun, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const failRunPermanent = `-- name: FailRunPermanent :execrows
+UPDATE job_runs SET status = 'FAILED', last_error = $1,
+    finished_at = NOW(), lease_expires_at = NULL, worker_id = NULL
+WHERE id = $2 AND status = 'RUNNING'
+  AND worker_id = $3 AND fencing_token = $4
+  AND attempt_count >= max_attempts
+`
+
+type FailRunPermanentParams struct {
+	LastError    sql.NullString
+	ID           uuid.UUID
+	WorkerID     sql.NullString
+	FencingToken int64
+}
+
+func (q *Queries) FailRunPermanent(ctx context.Context, arg FailRunPermanentParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, failRunPermanent,
+		arg.LastError,
+		arg.ID,
+		arg.WorkerID,
+		arg.FencingToken,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const getJobForRunUpdate = `-- name: GetJobForRunUpdate :one
+SELECT j.id, j.name, j.event_type, j.payload, j.schedule_type, j.scheduled_at, j.cron_expression, j.timezone, j.next_run_at, j.max_attempts, j.retry_delay_seconds, j.timeout_seconds, j.create_idempotency_key, j.create_request_hash, j.created_at, j.updated_at FROM jobs j JOIN job_runs r ON r.job_id = j.id
+WHERE r.id = $1 FOR UPDATE OF j
+`
+
+func (q *Queries) GetJobForRunUpdate(ctx context.Context, id uuid.UUID) (Job, error) {
+	row := q.db.QueryRowContext(ctx, getJobForRunUpdate, id)
+	var i Job
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.EventType,
+		&i.Payload,
+		&i.ScheduleType,
+		&i.ScheduledAt,
+		&i.CronExpression,
+		&i.Timezone,
+		&i.NextRunAt,
+		&i.MaxAttempts,
+		&i.RetryDelaySeconds,
+		&i.TimeoutSeconds,
+		&i.CreateIdempotencyKey,
+		&i.CreateRequestHash,
+		&i.CreatedAt,
+		&i.UpdatedAt,
 	)
 	return i, err
 }
 
 const getJobRun = `-- name: GetJobRun :one
-SELECT id, job_id, retry_of_run_id, scheduled_for, trigger_source, trigger_idempotency_key, trigger_request_hash, event_type_snapshot, payload_snapshot, timeout_seconds, status, attempt_count, max_attempts, worker_id, fencing_token, lease_expires_at, heartbeat_at, retry_at, deadline_at, started_at, last_attempt_started_at, finished_at, cancel_requested_at, cancelled_at, cancel_reason, last_error, exit_code, result, created_at, updated_at
+SELECT id, job_id, retry_of_run_id, scheduled_for, trigger_source, trigger_idempotency_key, trigger_request_hash, event_type_snapshot, payload_snapshot, timeout_seconds, status, attempt_count, max_attempts, worker_id, fencing_token, lease_expires_at, heartbeat_at, retry_at, deadline_at, started_at, last_attempt_started_at, finished_at, cancel_requested_at, cancelled_at, cancel_reason, last_error, exit_code, result, created_at, updated_at, retry_delay_seconds
 FROM job_runs
 WHERE id = $1 AND job_id = $2
 `
@@ -182,12 +359,56 @@ func (q *Queries) GetJobRun(ctx context.Context, arg GetJobRunParams) (JobRun, e
 		&i.Result,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.RetryDelaySeconds,
+	)
+	return i, err
+}
+
+const getJobRunByID = `-- name: GetJobRunByID :one
+SELECT id, job_id, retry_of_run_id, scheduled_for, trigger_source, trigger_idempotency_key, trigger_request_hash, event_type_snapshot, payload_snapshot, timeout_seconds, status, attempt_count, max_attempts, worker_id, fencing_token, lease_expires_at, heartbeat_at, retry_at, deadline_at, started_at, last_attempt_started_at, finished_at, cancel_requested_at, cancelled_at, cancel_reason, last_error, exit_code, result, created_at, updated_at, retry_delay_seconds FROM job_runs WHERE id = $1
+`
+
+func (q *Queries) GetJobRunByID(ctx context.Context, id uuid.UUID) (JobRun, error) {
+	row := q.db.QueryRowContext(ctx, getJobRunByID, id)
+	var i JobRun
+	err := row.Scan(
+		&i.ID,
+		&i.JobID,
+		&i.RetryOfRunID,
+		&i.ScheduledFor,
+		&i.TriggerSource,
+		&i.TriggerIdempotencyKey,
+		&i.TriggerRequestHash,
+		&i.EventTypeSnapshot,
+		&i.PayloadSnapshot,
+		&i.TimeoutSeconds,
+		&i.Status,
+		&i.AttemptCount,
+		&i.MaxAttempts,
+		&i.WorkerID,
+		&i.FencingToken,
+		&i.LeaseExpiresAt,
+		&i.HeartbeatAt,
+		&i.RetryAt,
+		&i.DeadlineAt,
+		&i.StartedAt,
+		&i.LastAttemptStartedAt,
+		&i.FinishedAt,
+		&i.CancelRequestedAt,
+		&i.CancelledAt,
+		&i.CancelReason,
+		&i.LastError,
+		&i.ExitCode,
+		&i.Result,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.RetryDelaySeconds,
 	)
 	return i, err
 }
 
 const getJobRunByIDForUpdate = `-- name: GetJobRunByIDForUpdate :one
-SELECT id, job_id, retry_of_run_id, scheduled_for, trigger_source, trigger_idempotency_key, trigger_request_hash, event_type_snapshot, payload_snapshot, timeout_seconds, status, attempt_count, max_attempts, worker_id, fencing_token, lease_expires_at, heartbeat_at, retry_at, deadline_at, started_at, last_attempt_started_at, finished_at, cancel_requested_at, cancelled_at, cancel_reason, last_error, exit_code, result, created_at, updated_at FROM job_runs WHERE id = $1 FOR UPDATE
+SELECT id, job_id, retry_of_run_id, scheduled_for, trigger_source, trigger_idempotency_key, trigger_request_hash, event_type_snapshot, payload_snapshot, timeout_seconds, status, attempt_count, max_attempts, worker_id, fencing_token, lease_expires_at, heartbeat_at, retry_at, deadline_at, started_at, last_attempt_started_at, finished_at, cancel_requested_at, cancelled_at, cancel_reason, last_error, exit_code, result, created_at, updated_at, retry_delay_seconds FROM job_runs WHERE id = $1 FOR UPDATE
 `
 
 func (q *Queries) GetJobRunByIDForUpdate(ctx context.Context, id uuid.UUID) (JobRun, error) {
@@ -224,6 +445,7 @@ func (q *Queries) GetJobRunByIDForUpdate(ctx context.Context, id uuid.UUID) (Job
 		&i.Result,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.RetryDelaySeconds,
 	)
 	return i, err
 }
@@ -269,7 +491,7 @@ func (q *Queries) GetLatestJobRunSummary(ctx context.Context, jobID uuid.UUID) (
 }
 
 const getManualRunByIdempotencyKey = `-- name: GetManualRunByIdempotencyKey :one
-SELECT id, job_id, retry_of_run_id, scheduled_for, trigger_source, trigger_idempotency_key, trigger_request_hash, event_type_snapshot, payload_snapshot, timeout_seconds, status, attempt_count, max_attempts, worker_id, fencing_token, lease_expires_at, heartbeat_at, retry_at, deadline_at, started_at, last_attempt_started_at, finished_at, cancel_requested_at, cancelled_at, cancel_reason, last_error, exit_code, result, created_at, updated_at FROM job_runs
+SELECT id, job_id, retry_of_run_id, scheduled_for, trigger_source, trigger_idempotency_key, trigger_request_hash, event_type_snapshot, payload_snapshot, timeout_seconds, status, attempt_count, max_attempts, worker_id, fencing_token, lease_expires_at, heartbeat_at, retry_at, deadline_at, started_at, last_attempt_started_at, finished_at, cancel_requested_at, cancelled_at, cancel_reason, last_error, exit_code, result, created_at, updated_at, retry_delay_seconds FROM job_runs
 WHERE job_id = $1 AND trigger_idempotency_key = $2
   AND trigger_source = 'MANUAL'
 `
@@ -313,8 +535,35 @@ func (q *Queries) GetManualRunByIdempotencyKey(ctx context.Context, arg GetManua
 		&i.Result,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.RetryDelaySeconds,
 	)
 	return i, err
+}
+
+const heartbeatRun = `-- name: HeartbeatRun :execrows
+UPDATE job_runs SET heartbeat_at = NOW(), lease_expires_at = $1
+WHERE id = $2 AND status IN ('RUNNING', 'CANCEL_REQUESTED')
+  AND worker_id = $3 AND fencing_token = $4
+`
+
+type HeartbeatRunParams struct {
+	LeaseExpiresAt sql.NullTime
+	ID             uuid.UUID
+	WorkerID       sql.NullString
+	FencingToken   int64
+}
+
+func (q *Queries) HeartbeatRun(ctx context.Context, arg HeartbeatRunParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, heartbeatRun,
+		arg.LeaseExpiresAt,
+		arg.ID,
+		arg.WorkerID,
+		arg.FencingToken,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const jobRunStatusCounts = `-- name: JobRunStatusCounts :many
@@ -354,7 +603,7 @@ func (q *Queries) JobRunStatusCounts(ctx context.Context, jobID uuid.UUID) ([]Jo
 }
 
 const listJobRunsPage = `-- name: ListJobRunsPage :many
-SELECT id, job_id, retry_of_run_id, scheduled_for, trigger_source, trigger_idempotency_key, trigger_request_hash, event_type_snapshot, payload_snapshot, timeout_seconds, status, attempt_count, max_attempts, worker_id, fencing_token, lease_expires_at, heartbeat_at, retry_at, deadline_at, started_at, last_attempt_started_at, finished_at, cancel_requested_at, cancelled_at, cancel_reason, last_error, exit_code, result, created_at, updated_at
+SELECT id, job_id, retry_of_run_id, scheduled_for, trigger_source, trigger_idempotency_key, trigger_request_hash, event_type_snapshot, payload_snapshot, timeout_seconds, status, attempt_count, max_attempts, worker_id, fencing_token, lease_expires_at, heartbeat_at, retry_at, deadline_at, started_at, last_attempt_started_at, finished_at, cancel_requested_at, cancelled_at, cancel_reason, last_error, exit_code, result, created_at, updated_at, retry_delay_seconds
 FROM job_runs
 WHERE job_id = $1
   AND ($2::uuid IS NULL OR id < $2::uuid)
@@ -408,6 +657,7 @@ func (q *Queries) ListJobRunsPage(ctx context.Context, arg ListJobRunsPageParams
 			&i.Result,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.RetryDelaySeconds,
 		); err != nil {
 			return nil, err
 		}
@@ -423,7 +673,7 @@ func (q *Queries) ListJobRunsPage(ctx context.Context, arg ListJobRunsPageParams
 }
 
 const listRunsPage = `-- name: ListRunsPage :many
-SELECT id, job_id, retry_of_run_id, scheduled_for, trigger_source, trigger_idempotency_key, trigger_request_hash, event_type_snapshot, payload_snapshot, timeout_seconds, status, attempt_count, max_attempts, worker_id, fencing_token, lease_expires_at, heartbeat_at, retry_at, deadline_at, started_at, last_attempt_started_at, finished_at, cancel_requested_at, cancelled_at, cancel_reason, last_error, exit_code, result, created_at, updated_at
+SELECT id, job_id, retry_of_run_id, scheduled_for, trigger_source, trigger_idempotency_key, trigger_request_hash, event_type_snapshot, payload_snapshot, timeout_seconds, status, attempt_count, max_attempts, worker_id, fencing_token, lease_expires_at, heartbeat_at, retry_at, deadline_at, started_at, last_attempt_started_at, finished_at, cancel_requested_at, cancelled_at, cancel_reason, last_error, exit_code, result, created_at, updated_at, retry_delay_seconds
 FROM job_runs
 WHERE ($1::uuid IS NULL OR job_id = $1)
   AND ($2::text IS NULL OR status = $2)
@@ -491,6 +741,7 @@ func (q *Queries) ListRunsPage(ctx context.Context, arg ListRunsPageParams) ([]J
 			&i.Result,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.RetryDelaySeconds,
 		); err != nil {
 			return nil, err
 		}
@@ -509,16 +760,16 @@ const manualJobRun = `-- name: ManualJobRun :one
 INSERT INTO job_runs (
     id, job_id, scheduled_for, trigger_source,
     trigger_idempotency_key, trigger_request_hash,
-    event_type_snapshot, payload_snapshot, timeout_seconds, max_attempts,
+    event_type_snapshot, payload_snapshot, timeout_seconds, retry_delay_seconds, max_attempts,
     status, attempt_count, created_at
 )
 VALUES (
     $1, $2, NOW(), 'MANUAL',
     $3, $4,
-    $5, $6, $7, $8,
+    $5, $6, $7, $8, $9,
     'QUEUED', 0, NOW()
 )
-RETURNING id, job_id, retry_of_run_id, scheduled_for, trigger_source, trigger_idempotency_key, trigger_request_hash, event_type_snapshot, payload_snapshot, timeout_seconds, status, attempt_count, max_attempts, worker_id, fencing_token, lease_expires_at, heartbeat_at, retry_at, deadline_at, started_at, last_attempt_started_at, finished_at, cancel_requested_at, cancelled_at, cancel_reason, last_error, exit_code, result, created_at, updated_at
+RETURNING id, job_id, retry_of_run_id, scheduled_for, trigger_source, trigger_idempotency_key, trigger_request_hash, event_type_snapshot, payload_snapshot, timeout_seconds, status, attempt_count, max_attempts, worker_id, fencing_token, lease_expires_at, heartbeat_at, retry_at, deadline_at, started_at, last_attempt_started_at, finished_at, cancel_requested_at, cancelled_at, cancel_reason, last_error, exit_code, result, created_at, updated_at, retry_delay_seconds
 `
 
 type ManualJobRunParams struct {
@@ -529,6 +780,7 @@ type ManualJobRunParams struct {
 	EventTypeSnapshot     string
 	PayloadSnapshot       json.RawMessage
 	TimeoutSeconds        int32
+	RetryDelaySeconds     int32
 	MaxAttempts           int32
 }
 
@@ -541,6 +793,7 @@ func (q *Queries) ManualJobRun(ctx context.Context, arg ManualJobRunParams) (Job
 		arg.EventTypeSnapshot,
 		arg.PayloadSnapshot,
 		arg.TimeoutSeconds,
+		arg.RetryDelaySeconds,
 		arg.MaxAttempts,
 	)
 	var i JobRun
@@ -575,6 +828,36 @@ func (q *Queries) ManualJobRun(ctx context.Context, arg ManualJobRunParams) (Job
 		&i.Result,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.RetryDelaySeconds,
 	)
 	return i, err
+}
+
+const scheduleRunRetry = `-- name: ScheduleRunRetry :execrows
+UPDATE job_runs SET status = 'RETRY_WAIT', last_error = $1,
+    retry_at = NOW() + make_interval(secs => retry_delay_seconds),
+    lease_expires_at = NULL, worker_id = NULL
+WHERE id = $2 AND status = 'RUNNING'
+  AND worker_id = $3 AND fencing_token = $4
+  AND attempt_count < max_attempts
+`
+
+type ScheduleRunRetryParams struct {
+	LastError    sql.NullString
+	ID           uuid.UUID
+	WorkerID     sql.NullString
+	FencingToken int64
+}
+
+func (q *Queries) ScheduleRunRetry(ctx context.Context, arg ScheduleRunRetryParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, scheduleRunRetry,
+		arg.LastError,
+		arg.ID,
+		arg.WorkerID,
+		arg.FencingToken,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }

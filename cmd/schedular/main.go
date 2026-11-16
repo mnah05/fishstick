@@ -24,15 +24,16 @@ import (
 // scheduler copies these values into the run so later job edits cannot change
 // an already-created occurrence.
 type dueJob struct {
-	id             uuid.UUID
-	eventType      string
-	payload        []byte
-	scheduleType   string
-	cronExpression sql.NullString
-	timezone       string
-	nextRunAt      time.Time
-	maxAttempts    int32
-	timeoutSeconds int32
+	id                uuid.UUID
+	eventType         string
+	payload           []byte
+	scheduleType      string
+	cronExpression    sql.NullString
+	timezone          string
+	nextRunAt         time.Time
+	maxAttempts       int32
+	retryDelaySeconds int32
+	timeoutSeconds    int32
 }
 
 func main() {
@@ -158,7 +159,7 @@ func processDueJobs(ctx context.Context, db *sql.DB, batchSize int, now time.Tim
 			id: job.ID, eventType: job.EventType, payload: job.Payload,
 			scheduleType: job.ScheduleType, cronExpression: job.CronExpression,
 			timezone: job.Timezone, nextRunAt: job.NextRunAt.Time,
-			maxAttempts: job.MaxAttempts, timeoutSeconds: job.TimeoutSeconds,
+			maxAttempts: job.MaxAttempts, retryDelaySeconds: job.RetryDelaySeconds, timeoutSeconds: job.TimeoutSeconds,
 		}
 		if err := createOccurrence(ctx, qtx, occurrence, now); err != nil {
 			if rollbackErr := qtx.RollbackSchedulerOccurrence(ctx); rollbackErr != nil {
@@ -220,7 +221,7 @@ func createOccurrence(ctx context.Context, qtx *sqlc.Queries, job dueJob, now ti
 	if err := qtx.CreateScheduledRun(ctx, sqlc.CreateScheduledRunParams{
 		ID: runID, JobID: job.id, ScheduledFor: job.nextRunAt,
 		EventTypeSnapshot: job.eventType, PayloadSnapshot: job.payload,
-		TimeoutSeconds: job.timeoutSeconds, MaxAttempts: job.maxAttempts, CreatedAt: now,
+		TimeoutSeconds: job.timeoutSeconds, RetryDelaySeconds: job.retryDelaySeconds, MaxAttempts: job.maxAttempts, CreatedAt: now,
 	}); err != nil {
 		return fmt.Errorf("insert scheduled run: %w", err)
 	}

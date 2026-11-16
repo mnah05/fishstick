@@ -69,9 +69,9 @@ func (q *Queries) CreateScheduledDispatchOutbox(ctx context.Context, arg CreateS
 const createScheduledRun = `-- name: CreateScheduledRun :exec
 INSERT INTO job_runs (
     id, job_id, scheduled_for, trigger_source, event_type_snapshot,
-    payload_snapshot, timeout_seconds, max_attempts, status, attempt_count, created_at
+    payload_snapshot, timeout_seconds, retry_delay_seconds, max_attempts, status, attempt_count, created_at
 )
-VALUES ($1, $2, $3, 'SCHEDULED', $4, $5, $6, $7, 'QUEUED', 0, $8)
+VALUES ($1, $2, $3, 'SCHEDULED', $4, $5, $6, $7, $8, 'QUEUED', 0, $9)
 ON CONFLICT (job_id, scheduled_for) WHERE trigger_source = 'SCHEDULED' DO NOTHING
 `
 
@@ -82,6 +82,7 @@ type CreateScheduledRunParams struct {
 	EventTypeSnapshot string
 	PayloadSnapshot   json.RawMessage
 	TimeoutSeconds    int32
+	RetryDelaySeconds int32
 	MaxAttempts       int32
 	CreatedAt         time.Time
 }
@@ -95,6 +96,7 @@ func (q *Queries) CreateScheduledRun(ctx context.Context, arg CreateScheduledRun
 		arg.EventTypeSnapshot,
 		arg.PayloadSnapshot,
 		arg.TimeoutSeconds,
+		arg.RetryDelaySeconds,
 		arg.MaxAttempts,
 		arg.CreatedAt,
 	)
@@ -121,7 +123,7 @@ func (q *Queries) GetScheduledRunID(ctx context.Context, arg GetScheduledRunIDPa
 
 const listDueScheduledJobs = `-- name: ListDueScheduledJobs :many
 SELECT id, event_type, payload, schedule_type, cron_expression, timezone,
-       next_run_at, max_attempts, timeout_seconds
+       next_run_at, max_attempts, retry_delay_seconds, timeout_seconds
 FROM jobs
 WHERE next_run_at <= $1
 ORDER BY next_run_at, id
@@ -135,15 +137,16 @@ type ListDueScheduledJobsParams struct {
 }
 
 type ListDueScheduledJobsRow struct {
-	ID             uuid.UUID
-	EventType      string
-	Payload        json.RawMessage
-	ScheduleType   string
-	CronExpression sql.NullString
-	Timezone       string
-	NextRunAt      sql.NullTime
-	MaxAttempts    int32
-	TimeoutSeconds int32
+	ID                uuid.UUID
+	EventType         string
+	Payload           json.RawMessage
+	ScheduleType      string
+	CronExpression    sql.NullString
+	Timezone          string
+	NextRunAt         sql.NullTime
+	MaxAttempts       int32
+	RetryDelaySeconds int32
+	TimeoutSeconds    int32
 }
 
 // Lock only the due job definitions this poll will handle. SKIP LOCKED lets
@@ -166,6 +169,7 @@ func (q *Queries) ListDueScheduledJobs(ctx context.Context, arg ListDueScheduled
 			&i.Timezone,
 			&i.NextRunAt,
 			&i.MaxAttempts,
+			&i.RetryDelaySeconds,
 			&i.TimeoutSeconds,
 		); err != nil {
 			return nil, err

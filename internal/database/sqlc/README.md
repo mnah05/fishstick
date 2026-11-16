@@ -23,9 +23,9 @@ Edit SQL sources and configuration, not generated Go files.
 | `health.sql` | Database health check (`SELECT 1`) |
 | `jobs.sql` | Create, update, and load a job with a row lock |
 | `jobs_list.sql` | Fetch jobs, creation idempotency, busy-run check, paginated listing with nullable latest-run fields |
-| `job_runs.sql` | Latest run, status counts, get/list runs by job, filtered global run list, cancel run (immediate / request), manual run insert, trigger idempotency lookup, claim-to-running |
-| `outbox.sql` | Insert a pending dispatch event |
-| `scheduler.sql` | Lock due jobs, isolate each occurrence with savepoints, insert one queued scheduled run and its pending dispatch event, advance `next_run_at` |
+| `job_runs.sql` | Run lookup/listing, claim and lease fencing, heartbeat, success/failure/retry/cancel transitions, expired-lease recovery, manual run snapshots |
+| `outbox.sql` | Pending event insertion, relay claims, publish completion/release, retry dispatch, dead-letter insertion and reads |
+| `scheduler.sql` | Lock due jobs, isolate each occurrence with savepoints, insert one queued scheduled run with retry snapshots and its pending dispatch event, advance `next_run_at` |
 
 The package uses `database/sql` and application-generated UUIDv7 IDs. Nullable
 JSONB uses `sql.Null[[]byte]`; check `Valid` before decoding `V`. API handlers map
@@ -47,16 +47,17 @@ serializes concurrent trigger requests; the unique manual-trigger index also
 enforces uniqueness in PostgreSQL. Calling either insert on the pool directly
 does not provide atomicity across the two writes.
 
-The outbox query only persists an event. No relay, publisher, or worker exists.
-See [database setup](../README.md) and [HTTP API](../../api/README.md).
+The relay and worker own the outbox and run lifecycle queries. See [database
+setup](../README.md), [relay](../../../cmd/relay/README.md), [worker](../../../cmd/worker/README.md), and [HTTP API](../../api/README.md).
 
 ## Job-update transaction
 
 Updates also bind queries with `WithTx` and lock the job with `GetJobForUpdate`.
 `JobHasBusyRun` blocks `RUNNING` and `CANCEL_REQUESTED` executions **while the row’s
 `lease_expires_at` is NULL or still in the future**. An expired lease is treated as
-not busy so operators can recover stuck work; workers must set `lease_expires_at`
-when claiming (see `ClaimRunToRunning`). Validation,
+not busy so operators can recover stuck work; workers set `lease_expires_at`
+when claiming (see `ClaimRunToRunning`). An expired `RUNNING` lease can be
+reclaimed with a new fencing token. Validation,
 `UpdateJob`, and the final `GetJob` run before commit; errors roll back the
-transaction. This uses the same job lock as manual triggers. Future worker claims
-must lock that job before transitioning a run, using job-before-run lock ordering.
+transaction. This uses the same job lock as manual triggers. Worker claims keep
+job-before-run lock ordering.

@@ -5,13 +5,13 @@
 From the project root:
 
 ```sh
-docker compose up -d
+docker compose -f .docker/docker-compose.yml up -d postgres
 export DATABASE_URL='postgres://postgres:postgres@localhost:5432/fishstick?sslmode=disable'
 goose -dir internal/database/migrations postgres "$DATABASE_URL" up
 go run ./cmd/api
 ```
 
-Reset DB: `docker compose down -v`, then repeat the steps above. See [internal/database/README.md](../../internal/database/README.md).
+Reset DB: `docker compose -f .docker/docker-compose.yml down -v`, then repeat the steps above. See [internal/database/README.md](../../internal/database/README.md).
 
 ## Example curls
 
@@ -52,8 +52,8 @@ curl -i -X POST http://localhost:8080/v1/job/trigger/01933e8c-0000-7000-8000-000
 
 Returns `202` with the queued run. Repeat the same key for the same job to get
 that run again; use a new key for another execution. Both the run and its pending
-outbox event are committed together. There is no relay or worker yet, so this
-does not publish to RabbitMQ or execute the job.
+outbox event are committed together. Start `cmd/relay` and `cmd/worker` with
+RabbitMQ configuration to publish and execute the queued run.
 
 ## Without Docker
 

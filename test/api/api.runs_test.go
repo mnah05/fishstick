@@ -40,7 +40,7 @@ func TestTriggerValidation(t *testing.T) {
 func TestTriggerPostgresIntegration(t *testing.T) {
 	db := newIntegrationDB(t)
 	jobID := uuid.NewString()
-	if _, err := db.Exec(`INSERT INTO jobs (id,name,event_type,payload,timeout_seconds,max_attempts) VALUES ($1,'test','test.run','{"value":1}',45,5)`, jobID); err != nil {
+	if _, err := db.Exec(`INSERT INTO jobs (id,name,event_type,payload,timeout_seconds,max_attempts,retry_delay_seconds) VALUES ($1,'test','test.run','{"value":1}',45,5,17)`, jobID); err != nil {
 		t.Fatal(err)
 	}
 	router := api.NewTestRouter(db)
@@ -101,6 +101,13 @@ func TestTriggerPostgresIntegration(t *testing.T) {
 		}
 	}
 	assertCounts(1)
+	var retrySnapshot int32
+	if err := db.QueryRow(`SELECT retry_delay_seconds FROM job_runs WHERE id=$1`, runID).Scan(&retrySnapshot); err != nil {
+		t.Fatal(err)
+	}
+	if retrySnapshot != 17 {
+		t.Fatalf("manual run retry delay snapshot=%d, want 17", retrySnapshot)
+	}
 	var eventRunID, status string
 	if err := db.QueryRow(`SELECT message->>'run_id',status FROM outbox_events`).Scan(&eventRunID, &status); err != nil {
 		t.Fatal(err)

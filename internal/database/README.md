@@ -38,8 +38,8 @@ go run ./cmd/api
 
 ## Run the execution pipeline
 
-Start both databases, migrate Postgres as above, and use one terminal for each
-process:
+Start PostgreSQL and RabbitMQ, migrate Postgres as above, and use one terminal
+for each process:
 
 ```sh
 docker compose -f .docker/docker-compose.yml --profile messaging up -d
@@ -47,12 +47,24 @@ go run ./cmd/api
 go run ./cmd/schedular
 go run ./cmd/relay
 go run ./cmd/worker
+go run ./cmd/watcher
 ```
 
 Set `RELAY_RABBIT_URL` and `WORKER_RABBIT_URL` if the local broker credentials
 or address differ from the example values. The worker's built-in development
 handler returns an empty result for every event type; replace it before running
 real jobs.
+
+The lease watcher polls expired `RUNNING` leases. Runs with attempts remaining
+move to `RETRY_WAIT` and receive a delayed dispatch through the outbox; exhausted
+runs move to `FAILED` with an `OPEN` dead-letter entry. Configure polling with
+`WATCHER_INTERVAL`, `WATCHER_BATCH_SIZE`, `WATCHER_SHUTDOWN_GRACE`, and
+`WATCHER_HEALTH_ADDRESS`.
+
+Scheduler and watcher use the shared `internal/process` poller for readiness
+and graceful shutdown. Dispatch producers and consumers use
+`internal/messaging` for the `{"run_id":"..."}` payload and RabbitMQ queue
+topology.
 
 ## Integration tests
 

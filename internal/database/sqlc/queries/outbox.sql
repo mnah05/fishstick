@@ -45,7 +45,7 @@ ON CONFLICT (run_id) DO NOTHING;
 -- name: InsertRetryDispatch :exec
 INSERT INTO outbox_events (id, run_id, event_kind, status, message, available_at)
 SELECT sqlc.arg('id'), r.id, 'JOB_DISPATCH', 'PENDING',
-       jsonb_build_object('run_id', r.id), r.retry_at
+       sqlc.arg('message'), r.retry_at
 FROM job_runs r
 WHERE r.id = sqlc.arg('run_id') AND r.status = 'RETRY_WAIT';
 

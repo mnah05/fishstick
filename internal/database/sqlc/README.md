@@ -23,7 +23,7 @@ Edit SQL sources and configuration, not generated Go files.
 | `health.sql` | Database health check (`SELECT 1`) |
 | `jobs.sql` | Create, update, and load a job with a row lock |
 | `jobs_list.sql` | Fetch jobs, creation idempotency, busy-run check, paginated listing with nullable latest-run fields |
-| `job_runs.sql` | Run lookup/listing, claim and lease fencing, heartbeat, success/failure/retry/cancel transitions, expired-lease recovery, manual run snapshots |
+| `job_runs.sql` | Run lookup/listing, expired-lease candidate scans, claim and lease fencing, heartbeat, success/failure/retry/cancel transitions, manual run snapshots |
 | `outbox.sql` | Pending event insertion, relay claims, publish completion/release, retry dispatch, dead-letter insertion and reads |
 | `scheduler.sql` | Lock due jobs, isolate each occurrence with savepoints, insert one queued scheduled run with retry snapshots and its pending dispatch event, advance `next_run_at` |
 
@@ -47,8 +47,13 @@ serializes concurrent trigger requests; the unique manual-trigger index also
 enforces uniqueness in PostgreSQL. Calling either insert on the pool directly
 does not provide atomicity across the two writes.
 
-The relay and worker own the outbox and run lifecycle queries. See [database
-setup](../README.md), [relay](../../../cmd/relay/README.md), [worker](../../../cmd/worker/README.md), and [HTTP API](../../api/README.md).
+The relay owns outbox publishing; the worker owns claims and handler outcomes;
+the watcher owns proactive recovery of expired `RUNNING` leases. See [database
+setup](../README.md), [relay](../../../cmd/relay/README.md), [worker](../../../cmd/worker/README.md), [watcher](../../../cmd/watcher/README.md), and [HTTP API](../../api/README.md).
+
+Process transactions use `database.BeginQueries`, which returns SQLC bound
+directly to the new `sql.Tx`. Worker claims and watcher recovery use
+`database.LockJobRunForUpdate` to enforce job-before-run locking.
 
 ## Job-update transaction
 
@@ -57,7 +62,8 @@ Updates also bind queries with `WithTx` and lock the job with `GetJobForUpdate`.
 `lease_expires_at` is NULL or still in the future**. An expired lease is treated as
 not busy so operators can recover stuck work; workers set `lease_expires_at`
 when claiming (see `ClaimRunToRunning`). An expired `RUNNING` lease can be
-reclaimed with a new fencing token. Validation,
+reclaimed with a new fencing token when a worker is already handling a delivery,
+or proactively moved to retry/dead-letter by `cmd/watcher`. Validation,
 `UpdateJob`, and the final `GetJob` run before commit; errors roll back the
 transaction. This uses the same job lock as manual triggers. Worker claims keep
 job-before-run lock ordering.

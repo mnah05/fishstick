@@ -175,9 +175,9 @@ func (s *server) createJob(c echo.Context) error {
 // Holds the job row lock through validation and update; active executions block edits.
 // Worker claims must acquire the same job row lock before transitioning a run.
 func (s *server) updateJob(c echo.Context) error {
-	jobID, ok := pathUUID(c, "job_id")
-	if !ok {
-		return nil
+	jobID, err := pathUUID(c, "job_id")
+	if err != nil {
+		return err
 	}
 
 	var req UpdateJobRequest
@@ -270,9 +270,9 @@ func (s *server) listJobs(c echo.Context) error {
 
 // getJob handles GET /v1/job/get/{job_id}: job row plus optional latest run and per-status run counts.
 func (s *server) getJob(c echo.Context) error {
-	jobID, ok := pathUUID(c, "job_id")
-	if !ok {
-		return nil
+	jobID, err := pathUUID(c, "job_id")
+	if err != nil {
+		return err
 	}
 
 	ctx := c.Request().Context()

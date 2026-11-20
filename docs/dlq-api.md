@@ -10,6 +10,7 @@ The dead-letter introspection endpoints are implemented:
 List responses use `data` and optional `next_cursor`, matching other list
 endpoints. The cursor is opaque and should be passed back unchanged.
 
-The worker inserts an `OPEN` entry in the same transaction that marks a run
-`FAILED` after its configured attempts are exhausted. This MVP exposes reads;
-manual resolution and retry linkage remain follow-up work.
+The worker inserts an `OPEN` entry in the same transaction that marks a handler
+failure `FAILED` after its configured attempts are exhausted. The lease watcher
+does the same for an expired `RUNNING` lease at the attempt limit. This MVP
+exposes reads; manual resolution and retry linkage remain follow-up work.

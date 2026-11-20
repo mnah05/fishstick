@@ -17,6 +17,7 @@ run status.
 | `RUNNING` | Cancel API request | `CANCEL_REQUESTED`; worker stops cooperatively |
 | `CANCEL_REQUESTED` | Worker handler stops | `CANCELLED` |
 | `CANCEL_REQUESTED` | Lease expires after worker crash | Worker recovery finalizes `CANCELLED` |
+| `RUNNING` | Lease expires | Lease watcher retries or dead-letters according to attempts remaining |
 | Terminal state | Cancel API request | Conflict; terminal state is preserved |
 
 `CancelRun` makes the API transition conditional. Worker completion queries also
@@ -24,6 +25,10 @@ check `worker_id` and `fencing_token`; a worker whose lease was reclaimed cannot
 overwrite the current owner. Heartbeats extend the lease and check for
 `CANCEL_REQUESTED`. Cancellation is cooperative: Go cannot stop a handler that
 ignores its context.
+
+The lease watcher only processes expired `RUNNING` runs. Expired
+`CANCEL_REQUESTED` runs remain on the worker's cancellation recovery path and
+become `CANCELLED`; they are not retried or dead-lettered by the watcher.
 
 The worker uses the database state directly and does not publish a separate
 `JOB_CANCEL` message. The outbox schema still permits that event kind for a

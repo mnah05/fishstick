@@ -2,7 +2,7 @@
 
 `docker-compose.yml` starts PostgreSQL. RabbitMQ is optional and joins the
 `messaging` profile. `docker-compose.e2e.yml` adds a migration runner, API,
-three-process scheduler pool, relay, nine-worker pool, and a Go test runner.
+three-process scheduler pool, relay, nine-worker pool, lease watcher, and a Go test runner.
 
 ## Run scaled E2E
 
@@ -24,8 +24,8 @@ the real HTTP API → outbox → RabbitMQ → worker path for manual and schedul
 runs, twelve simultaneous scheduled jobs, and increasing manual bursts from
 18 to 288 runs (or another profile through `E2E_LOAD_BATCHES`). The scheduler
 batch size is one to create contention across its three replicas. The worker
-stub waits two seconds to make ownership observable; each worker appends its
-container hostname to its configured ID.
+stub waits two seconds to make ownership observable; each worker ID includes
+its configured label, hostname, and a unique process token.
 
 The suite checks that the scheduled job creates one run and one dispatch, that
 each run succeeds once with the captured retry delay, that outbox rows reach

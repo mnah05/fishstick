@@ -53,7 +53,9 @@ curl -i -X POST http://localhost:8080/v1/job/trigger/01933e8c-0000-7000-8000-000
 Returns `202` with the queued run. Repeat the same key for the same job to get
 that run again; use a new key for another execution. Both the run and its pending
 outbox event are committed together. Start `cmd/relay` and `cmd/worker` with
-RabbitMQ configuration to publish and execute the queued run.
+RabbitMQ configuration to publish and execute the queued run. Run `cmd/watcher`
+as part of the pipeline to recover worker leases that expire without a
+redelivered message.
 
 ## Without Docker
 

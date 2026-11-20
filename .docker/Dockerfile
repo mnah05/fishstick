@@ -6,7 +6,7 @@ COPY . .
 
 FROM source AS build
 RUN mkdir -p /out && \
-    for app in api schedular relay worker migrate; do \
+    for app in api schedular relay worker watcher migrate; do \
       CGO_ENABLED=0 go build -trimpath -o /out/$app ./cmd/$app; \
     done
 

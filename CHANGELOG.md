@@ -8,5 +8,8 @@
   status are converted to `QUEUED` by migration `00004`.
 - Added the outbox relay, lease-fenced execution worker, retry dispatch, and
   dead-letter list/get endpoints.
+- Added `cmd/watcher` to recover expired `RUNNING` leases. Runs with attempts
+  remaining return to `RETRY_WAIT` through the outbox; exhausted runs are
+  failed and recorded in the DLQ atomically.
 - Added a retry-delay snapshot to runs so retries use the job settings captured
   when the run was created.

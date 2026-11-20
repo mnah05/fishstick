@@ -39,6 +39,7 @@ events (optional later per `docs/cancellation.md`).
 | **C** | Outbox relay (`cmd/relay`) → `PUBLISHED` | — (can parallel A) |
 | **D** | Worker (`cmd/worker`) → claim, heartbeat, terminals, `RETRY_WAIT` | A, C (dispatch path) |
 | **E** | DLQ producer + read API | D |
+| **F** | Lease watcher → recover expired `RUNNING` leases | D, E |
 
 ```mermaid
 flowchart LR
@@ -46,6 +47,8 @@ flowchart LR
   A --> D[worker]
   C[relay] --> D
   D --> E[DLQ + GET /v1/dlq]
+  D --> F[lease watcher]
+  E --> F
 ```
 
 ---
@@ -207,17 +210,43 @@ snapshot columns already on `job_runs`.
 **Done when:** forced permanent failure creates DLQ row; list/get return 200 in
 integration tests.
 
+The lease watcher also writes an `OPEN` DLQ entry when an expired `RUNNING`
+lease has exhausted its attempts; that transition is covered by Phase F.
+
 ---
 
 ## Documentation and compose updates
 
-After Phases B–E:
+After Phases B–F:
 
 - Rewrite `docs/state-machines.md` transition table with **concrete owners**
-  (`cmd/worker`, `cmd/relay`, `cmd/api`, `cmd/schedular`).
-- `internal/README.md` — add worker, relay, runstatus to package table.
+  (`cmd/worker`, `cmd/watcher`, `cmd/relay`, `cmd/api`, `cmd/schedular`).
+- `internal/README.md` — list the runnable worker, watcher, relay, and scheduler
+  processes alongside the shared packages.
 - `internal/database/README.md` — new binaries in compose note.
 - Optional: root `README.md` if missing — link PLAN completion status.
+
+---
+
+## Phase F — Expired lease watcher (`cmd/watcher`)
+
+**Problem:** A crashed worker can leave a `RUNNING` row leased after the broker
+delivery is gone. Worker-side reclaim only helps when a message is redelivered.
+
+**Work delivered**
+
+1. Add SQLC candidate and transition queries for expired `RUNNING` leases.
+2. Add a polling watcher that locks the job before the run and rechecks the
+   lease before changing state.
+3. Atomically move runs with attempts remaining to `RETRY_WAIT` and insert a
+   delayed `JOB_DISPATCH` outbox record; atomically fail exhausted runs and add
+   an `OPEN` DLQ record.
+4. Add `WATCHER_*` configuration, `/healthz`, Docker image and E2E Compose
+   service, integration coverage, and lifecycle documentation.
+
+**Done when:** an expired run returns through the existing outbox and relay, or
+is dead-lettered at its attempt limit, without duplicate recovery across watcher
+replicas.
 
 ---
 
@@ -230,6 +259,7 @@ After Phases B–E:
 | Scheduler → outbox | existing `cmd/schedular` tests |
 | Relay | new relay integration test |
 | Worker lifecycle | new worker integration test (success, fail, retry, cancel) |
+| Expired lease recovery | `cmd/watcher` integration tests (retry, DLQ, concurrent watcher, heartbeat recheck) |
 | Status drift | `runstatus` sqlc literal test |
 | No phantom `SCHEDULED` status | `rg "status.*SCHEDULED" -g '*.sql'` excludes run status |
 
@@ -265,6 +295,6 @@ After Phases B–E:
   (`QUEUED` / `RETRY_WAIT`).
 - Adding a new run status requires updating `internal/runstatus` and failing
   tests if sqlc literals are out of sync.
-- A developer can run API + scheduler + relay + worker against Postgres (and
+- A developer can run API + scheduler + relay + worker + watcher against Postgres (and
   RabbitMQ for C/D) and observe a run move from creation to `SUCCEEDED` or
   `FAILED` without ad-hoc SQL.

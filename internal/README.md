@@ -7,26 +7,32 @@ pool. Start with [the local setup guide](../cmd/api/README.md).
 
 | Package | Responsibility |
 | --- | --- |
-| `config` | Load and validate `DATABASE_*` environment variables |
+| `config` | Load and validate shared database and process-specific environment variables |
 | `database` | Open the pool, apply embedded goose migrations, load development fixtures |
 | `database/sqlc` | Generated queries and database models |
 | `api` | Routes, validation, response mapping, and update/trigger transactions |
 | `runstatus` | Persisted run-status registry and state predicates |
+| `messaging` | Dispatch payload format and RabbitMQ queue topology |
+| `process` | Shared database poller, health endpoint, and shutdown runtime |
+| `instanceid` | Unique per-process lease-owner identifiers |
 
-The runnable processes are `cmd/api`, `cmd/schedular`, `cmd/relay`, and
-`cmd/worker`. RabbitMQ transport settings are process-specific; PostgreSQL
+The runnable processes are `cmd/api`, `cmd/schedular`, `cmd/relay`, `cmd/worker`,
+and `cmd/watcher`. RabbitMQ transport settings are process-specific; PostgreSQL
 settings are shared through `DATABASE_*`.
 
 `cmd/api/main.go` loads configuration, opens the pool, checks connectivity, and
 passes `db` to `api.NewRouter(db)`. The router creates its own `sqlc.Queries`.
 The update and trigger handlers also receive the pool to start transactions and bind their
-queries with `queries.WithTx(tx)`. Shutdown drains HTTP requests before closing
-the pool.
+queries through `database.BeginQueries`. That helper binds SQLC directly to the
+transaction; `database.LockJobRunForUpdate` keeps the worker and watcher lock
+order consistent. Shutdown drains HTTP requests before closing the pool.
 
 Job creation stores definitions and scheduling metadata. The scheduler writes
-scheduled occurrences, the relay publishes outbox messages, and the worker
-claims and completes runs. The worker's default development handler returns an
-empty result; deployments should register event-specific handlers.
+scheduled occurrences, the relay publishes outbox messages, the worker claims
+and completes runs, and the watcher recovers expired worker leases. Producers
+and consumers share the dispatch contract in `internal/messaging`. The worker's
+default development handler returns an empty result; deployments should
+register event-specific handlers.
 
 ## Development
 

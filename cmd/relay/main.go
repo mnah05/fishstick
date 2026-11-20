@@ -14,6 +14,8 @@ import (
 	"github.com/fishstick/internal/config"
 	"github.com/fishstick/internal/database"
 	"github.com/fishstick/internal/database/sqlc"
+	"github.com/fishstick/internal/instanceid"
+	"github.com/fishstick/internal/messaging"
 	"github.com/rabbitmq/amqp091-go"
 )
 
@@ -52,6 +54,7 @@ func processBatch(ctx context.Context, db *sql.DB, publisher Publisher, workerID
 		return 0, fmt.Errorf("claim outbox batch: %w", err)
 	}
 	completed := 0
+	var failures error
 	for _, row := range rows {
 		// [2] Broker confirmation comes before marking the outbox record published.
 		if err := publisher.Publish(ctx, row.Message); err != nil {
@@ -60,6 +63,7 @@ func processBatch(ctx context.Context, db *sql.DB, publisher Publisher, workerID
 			if releaseErr != nil {
 				return completed, errors.Join(fmt.Errorf("publish event %s: %w", row.ID, err), fmt.Errorf("release claim: %w", releaseErr))
 			}
+			failures = errors.Join(failures, fmt.Errorf("publish event %s: %w", row.ID, err))
 			continue
 		}
 		n, err := q.CompleteOutboxPublish(ctx, sqlc.CompleteOutboxPublishParams{ID: row.ID, LockedBy: sql.NullString{String: workerID, Valid: true}})
@@ -71,7 +75,7 @@ func processBatch(ctx context.Context, db *sql.DB, publisher Publisher, workerID
 		}
 		completed++
 	}
-	return completed, nil
+	return completed, failures
 }
 
 func backoff(attempts int32) time.Duration {
@@ -95,6 +99,7 @@ func main() {
 		logger.Error("load relay config", "error", err)
 		os.Exit(1)
 	}
+	workerID := instanceid.New(cfg.WorkerID)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	db, err := database.NewPostgres(ctx, dbCfg)
@@ -115,17 +120,8 @@ func main() {
 		os.Exit(1)
 	}
 	defer ch.Close()
-	if err = ch.ExchangeDeclare(cfg.Exchange, "direct", true, false, false, false, nil); err != nil {
-		logger.Error("declare exchange", "error", err)
-		os.Exit(1)
-	}
-	queue, err := ch.QueueDeclare(cfg.Queue, true, false, false, false, nil)
-	if err != nil {
-		logger.Error("declare worker queue", "error", err)
-		os.Exit(1)
-	}
-	if err = ch.QueueBind(queue.Name, cfg.RoutingKey, cfg.Exchange, false, nil); err != nil {
-		logger.Error("bind worker queue", "error", err)
+	if _, err = messaging.DeclareDispatchQueue(ch, cfg.Exchange, cfg.Queue, cfg.RoutingKey); err != nil {
+		logger.Error("declare dispatch queue", "error", err)
 		os.Exit(1)
 	}
 	if err = ch.Confirm(false); err != nil {
@@ -142,7 +138,7 @@ func main() {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			count, err := processBatch(ctx, db, pub, cfg.WorkerID, cfg.BatchSize, cfg.LockTTL)
+			count, err := processBatch(ctx, db, pub, workerID, cfg.BatchSize, cfg.LockTTL)
 			if err != nil {
 				logger.Error("relay poll failed", "error", err)
 			}

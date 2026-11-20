@@ -231,7 +231,7 @@ func holdJobLock(t *testing.T, db *sql.DB, id uuid.UUID) *sql.Tx {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { tx.Rollback() })
-	if _, err := sqlc.New(db).WithTx(tx).GetJobForUpdate(context.Background(), id); err != nil {
+	if _, err := sqlc.New(tx).GetJobForUpdate(context.Background(), id); err != nil {
 		t.Fatal(err)
 	}
 	return tx
@@ -329,7 +329,7 @@ func TestUpdateSeesWorkerClaimPostgresIntegration(t *testing.T) {
 	runID := insertTestRun(t, db, id, "QUEUED")
 	// Simulate worker claim: lock job row then transition with an active lease (required for JOB_BUSY).
 	tx := holdJobLock(t, db, id)
-	q := sqlc.New(db).WithTx(tx)
+	q := sqlc.New(tx)
 	if _, err := q.ClaimRunToRunning(context.Background(), sqlc.ClaimRunToRunningParams{
 		ID:    runID,
 		JobID: id,
@@ -419,7 +419,7 @@ func TestClaimThenUpdateConflictPostgresIntegration(t *testing.T) {
 	}()
 	waitForJobLockWaiters(t, db, 1)
 
-	q := sqlc.New(db).WithTx(tx)
+	q := sqlc.New(tx)
 	if _, err := q.ClaimRunToRunning(context.Background(), sqlc.ClaimRunToRunningParams{
 		ID:    runID,
 		JobID: id,
@@ -463,7 +463,7 @@ func TestUpdateThenClaimPostgresIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { tx.Rollback() })
-	qtx := sqlc.New(db).WithTx(tx)
+	qtx := sqlc.New(tx)
 	if _, err := qtx.GetJobForUpdate(ctx, id); err != nil {
 		t.Fatal(err)
 	}

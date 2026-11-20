@@ -4,18 +4,15 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"net/url"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/fishstick/internal/config"
-	"github.com/fishstick/internal/database"
 	"github.com/fishstick/internal/database/sqlc"
+	"github.com/fishstick/internal/messaging"
 	"github.com/fishstick/internal/testsupport"
 	"github.com/google/uuid"
-	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 func TestNewSchedulerConfig(t *testing.T) {
@@ -74,7 +71,7 @@ func TestNewSchedulerConfig(t *testing.T) {
 }
 
 func TestProcessDueJobsOnceOccurrenceAndIgnoresFutureJobs(t *testing.T) {
-	db := newSchedulerTestDB(t)
+	db := testsupport.IsolatedPostgresDB(t, "scheduler_test", nil)
 	ctx := context.Background()
 	now := time.Date(2025, 1, 2, 12, 0, 0, 0, time.UTC)
 	dueID := seedJob(t, db, "ONCE", now.Add(-time.Hour), "", "UTC")
@@ -101,7 +98,7 @@ func TestProcessDueJobsOnceOccurrenceAndIgnoresFutureJobs(t *testing.T) {
 
 func TestProcessDueJobsCronSkipsMissedTicksAndHonorsTimezone(t *testing.T) {
 	t.Run("missed ticks", func(t *testing.T) {
-		db := newSchedulerTestDB(t)
+		db := testsupport.IsolatedPostgresDB(t, "scheduler_test", nil)
 		now := time.Date(2025, 1, 2, 12, 13, 0, 0, time.UTC)
 		id := seedJob(t, db, "CRON", time.Date(2025, 1, 2, 12, 5, 0, 0, time.UTC), "*/5 * * * *", "UTC")
 		count, err := processDueJobs(context.Background(), db, 10, now)
@@ -120,7 +117,7 @@ func TestProcessDueJobsCronSkipsMissedTicksAndHonorsTimezone(t *testing.T) {
 	})
 
 	t.Run("local timezone", func(t *testing.T) {
-		db := newSchedulerTestDB(t)
+		db := testsupport.IsolatedPostgresDB(t, "scheduler_test", nil)
 		now := time.Date(2025, 1, 2, 15, 0, 0, 0, time.UTC)
 		due := time.Date(2025, 1, 2, 14, 0, 0, 0, time.UTC) // 9 AM in New York.
 		id := seedJob(t, db, "CRON", due, "0 9 * * *", "America/New_York")
@@ -139,7 +136,7 @@ func TestProcessDueJobsCronSkipsMissedTicksAndHonorsTimezone(t *testing.T) {
 }
 
 func TestProcessDueJobsRollbackKeepsOccurrenceDue(t *testing.T) {
-	db := newSchedulerTestDB(t)
+	db := testsupport.IsolatedPostgresDB(t, "scheduler_test", nil)
 	now := time.Date(2025, 1, 2, 12, 0, 0, 0, time.UTC)
 	id := seedJob(t, db, "ONCE", now.Add(-time.Hour), "", "UTC")
 	if _, err := db.Exec(`
@@ -176,7 +173,7 @@ func TestProcessDueJobsRejectsInvalidCronAndTimezoneAtomically(t *testing.T) {
 		{"invalid timezone", "0 * * * *", "Not/A_Timezone"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			db := newSchedulerTestDB(t)
+			db := testsupport.IsolatedPostgresDB(t, "scheduler_test", nil)
 			now := time.Date(2025, 1, 2, 12, 0, 0, 0, time.UTC)
 			id := seedJob(t, db, "CRON", now.Add(-time.Hour), test.expression, test.timezone)
 			if _, err := processDueJobs(context.Background(), db, 10, now); err == nil {
@@ -198,7 +195,7 @@ func TestProcessDueJobsRejectsInvalidCronAndTimezoneAtomically(t *testing.T) {
 }
 
 func TestProcessDueJobsKeepsValidJobsWhenAnotherScheduleIsInvalid(t *testing.T) {
-	db := newSchedulerTestDB(t)
+	db := testsupport.IsolatedPostgresDB(t, "scheduler_test", nil)
 	now := time.Date(2025, 1, 2, 12, 0, 0, 0, time.UTC)
 	badID := seedJob(t, db, "CRON", now.Add(-2*time.Hour), "not a cron", "UTC")
 	goodID := seedJob(t, db, "ONCE", now.Add(-time.Hour), "", "UTC")
@@ -221,7 +218,7 @@ func TestProcessDueJobsKeepsValidJobsWhenAnotherScheduleIsInvalid(t *testing.T) 
 }
 
 func TestProcessDueJobsBatchLimit(t *testing.T) {
-	db := newSchedulerTestDB(t)
+	db := testsupport.IsolatedPostgresDB(t, "scheduler_test", nil)
 	now := time.Date(2025, 1, 2, 12, 0, 0, 0, time.UTC)
 	for i := 0; i < 3; i++ {
 		seedJob(t, db, "ONCE", now.Add(-time.Hour), "", "UTC")
@@ -240,7 +237,7 @@ func TestProcessDueJobsBatchLimit(t *testing.T) {
 }
 
 func TestProcessDueJobsSkipsRowsLockedByAnotherScheduler(t *testing.T) {
-	db := newSchedulerTestDB(t)
+	db := testsupport.IsolatedPostgresDB(t, "scheduler_test", nil)
 	now := time.Date(2025, 1, 2, 12, 0, 0, 0, time.UTC)
 	seedJob(t, db, "ONCE", now.Add(-time.Hour), "", "UTC")
 	tx, err := db.BeginTx(context.Background(), nil)
@@ -248,7 +245,7 @@ func TestProcessDueJobsSkipsRowsLockedByAnotherScheduler(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tx.Rollback()
-	_, err = sqlc.New(db).WithTx(tx).ListDueScheduledJobs(context.Background(), sqlc.ListDueScheduledJobsParams{
+	_, err = sqlc.New(tx).ListDueScheduledJobs(context.Background(), sqlc.ListDueScheduledJobsParams{
 		Now: sql.NullTime{Time: now, Valid: true}, BatchSize: 1,
 	})
 	if err != nil {
@@ -268,7 +265,7 @@ func TestProcessDueJobsSkipsRowsLockedByAnotherScheduler(t *testing.T) {
 }
 
 func TestCreateOccurrenceIsIdempotentForSameOccurrence(t *testing.T) {
-	db := newSchedulerTestDB(t)
+	db := testsupport.IsolatedPostgresDB(t, "scheduler_test", nil)
 	ctx := context.Background()
 	now := time.Date(2025, 1, 2, 12, 0, 0, 0, time.UTC)
 	id := seedJob(t, db, "ONCE", now.Add(-time.Hour), "", "UTC")
@@ -277,7 +274,7 @@ func TestCreateOccurrenceIsIdempotentForSameOccurrence(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tx.Rollback()
-	qtx := sqlc.New(db).WithTx(tx)
+	qtx := sqlc.New(tx)
 	job := dueJob{
 		id: id, eventType: "test.event", payload: json.RawMessage(`{"ok":true}`),
 		scheduleType: "ONCE", timezone: "UTC", nextRunAt: now.Add(-time.Hour),
@@ -302,42 +299,6 @@ func TestCreateOccurrenceIsIdempotentForSameOccurrence(t *testing.T) {
 	if runs != 1 || outbox != 1 {
 		t.Fatalf("duplicate occurrence produced runs=%d outbox=%d, want 1 each", runs, outbox)
 	}
-}
-
-func newSchedulerTestDB(t *testing.T) *sql.DB {
-	t.Helper()
-	rawURL := testsupport.DatabaseURL(t)
-	u, err := url.Parse(rawURL)
-	if err != nil || (u.Scheme != "postgres" && u.Scheme != "postgresql") {
-		t.Fatal("TEST_DATABASE_URL must be a postgres:// or postgresql:// URL")
-	}
-	admin, err := sql.Open("pgx", rawURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = admin.Close() })
-	schema := "scheduler_test_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	if _, err := admin.Exec("CREATE SCHEMA " + schema); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if _, err := admin.Exec("DROP SCHEMA " + schema + " CASCADE"); err != nil {
-			t.Errorf("drop test schema: %v", err)
-		}
-	})
-	query := u.Query()
-	query.Set("search_path", schema)
-	query.Set("application_name", schema)
-	u.RawQuery = query.Encode()
-	db, err := sql.Open("pgx", u.String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	if err := database.RunMigrations(db, "up"); err != nil {
-		t.Fatal(err)
-	}
-	return db
 }
 
 func seedJob(t *testing.T, db *sql.DB, scheduleType string, nextRun time.Time, expression, timezone string) uuid.UUID {
@@ -396,13 +357,11 @@ func assertScheduledOccurrence(t *testing.T, db *sql.DB, jobID uuid.UUID, schedu
 	if eventRunID != runID || eventKind != "JOB_DISPATCH" || eventStatus != "PENDING" {
 		t.Fatalf("outbox run=%s kind=%q status=%q", eventRunID, eventKind, eventStatus)
 	}
-	var body struct {
-		RunID string `json:"run_id"`
-	}
-	if err := json.Unmarshal(message, &body); err != nil {
+	messageRunID, err := messaging.DecodeDispatch(message)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if body.RunID != runID.String() {
-		t.Fatalf("outbox message run_id = %q, want %q", body.RunID, runID)
+	if messageRunID != runID {
+		t.Fatalf("outbox message run_id = %q, want %q", messageRunID, runID)
 	}
 }

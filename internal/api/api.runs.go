@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/fishstick/internal/database/sqlc"
+	"github.com/fishstick/internal/messaging"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 )
@@ -58,9 +59,9 @@ type RunResponse struct {
 
 // triggerJob creates a manual run and its dispatch event in one transaction.
 func (s *server) triggerJob(c echo.Context) error {
-	jobID, ok := pathUUID(c, "job_id")
-	if !ok {
-		return nil
+	jobID, err := pathUUID(c, "job_id")
+	if err != nil {
+		return err
 	}
 	key, ok := idempotencyKeyFromHeader(c.Request())
 	if !ok {
@@ -131,9 +132,7 @@ func (s *server) triggerJob(c echo.Context) error {
 	if err != nil {
 		return writeAPIError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to create job run", nil)
 	}
-	message, err := json.Marshal(struct {
-		RunID string `json:"run_id"`
-	}{RunID: run.ID.String()})
+	message, err := messaging.EncodeDispatch(run.ID)
 	if err != nil {
 		return writeAPIError(c, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to encode dispatch event", nil)
 	}
@@ -150,13 +149,13 @@ func (s *server) triggerJob(c echo.Context) error {
 
 // getJobRun returns one run by id; it must belong to the given job.
 func (s *server) getJobRun(c echo.Context) error {
-	jobID, ok := pathUUID(c, "job_id")
-	if !ok {
-		return nil
+	jobID, err := pathUUID(c, "job_id")
+	if err != nil {
+		return err
 	}
-	runID, ok := pathUUID(c, "run_id")
-	if !ok {
-		return nil
+	runID, err := pathUUID(c, "run_id")
+	if err != nil {
+		return err
 	}
 	run, err := s.queries.GetJobRun(c.Request().Context(), sqlc.GetJobRunParams{ID: runID, JobID: jobID})
 	if err != nil {
@@ -170,9 +169,9 @@ func (s *server) getJobRun(c echo.Context) error {
 
 // listJobRuns pages runs for a job (newest first), same limit/cursor rules as list jobs.
 func (s *server) listJobRuns(c echo.Context) error {
-	jobID, ok := pathUUID(c, "job_id")
-	if !ok {
-		return nil
+	jobID, err := pathUUID(c, "job_id")
+	if err != nil {
+		return err
 	}
 	limit, cursor, err := ParseListCursor(c.Request())
 	if err != nil {
@@ -248,9 +247,9 @@ func (s *server) listRuns(c echo.Context) error {
 // The run row is locked before the state switch, so the conditional update below
 // sees the same status the switch did.
 func (s *server) cancelRun(c echo.Context) error {
-	runID, ok := pathUUID(c, "run_id")
-	if !ok {
-		return nil
+	runID, err := pathUUID(c, "run_id")
+	if err != nil {
+		return err
 	}
 	var req CancelRunRequest
 	if c.Request().Body != nil {

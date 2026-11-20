@@ -64,8 +64,25 @@ UPDATE job_runs SET status = 'FAILED',
     last_error = COALESCE(last_error, 'worker lease expired after max attempts'),
     finished_at = NOW(), lease_expires_at = NULL, worker_id = NULL
 WHERE id = sqlc.arg('id') AND status = 'RUNNING'
-  AND (lease_expires_at IS NULL OR lease_expires_at < NOW())
+  AND (lease_expires_at IS NULL OR lease_expires_at <= NOW())
   AND attempt_count >= max_attempts;
+
+-- name: ListExpiredRunningRunIDs :many
+SELECT id
+FROM job_runs
+WHERE status = 'RUNNING'
+  AND (lease_expires_at IS NULL OR lease_expires_at <= NOW())
+ORDER BY lease_expires_at NULLS FIRST, id
+LIMIT sqlc.arg('batch_size');
+
+-- name: RetryExpiredRun :execrows
+UPDATE job_runs SET status = 'RETRY_WAIT',
+    last_error = COALESCE(last_error, 'worker lease expired'),
+    retry_at = NOW() + make_interval(secs => retry_delay_seconds),
+    lease_expires_at = NULL, worker_id = NULL
+WHERE id = sqlc.arg('id') AND status = 'RUNNING'
+  AND (lease_expires_at IS NULL OR lease_expires_at <= NOW())
+  AND attempt_count < max_attempts;
 
 -- name: GetManualRunByIdempotencyKey :one
 SELECT * FROM job_runs

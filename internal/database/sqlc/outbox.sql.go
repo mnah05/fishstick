@@ -166,18 +166,19 @@ func (q *Queries) InsertDeadLetter(ctx context.Context, runID uuid.UUID) error {
 const insertRetryDispatch = `-- name: InsertRetryDispatch :exec
 INSERT INTO outbox_events (id, run_id, event_kind, status, message, available_at)
 SELECT $1, r.id, 'JOB_DISPATCH', 'PENDING',
-       jsonb_build_object('run_id', r.id), r.retry_at
+       $2, r.retry_at
 FROM job_runs r
-WHERE r.id = $2 AND r.status = 'RETRY_WAIT'
+WHERE r.id = $3 AND r.status = 'RETRY_WAIT'
 `
 
 type InsertRetryDispatchParams struct {
-	ID    uuid.UUID
-	RunID uuid.UUID
+	ID      uuid.UUID
+	Message json.RawMessage
+	RunID   uuid.UUID
 }
 
 func (q *Queries) InsertRetryDispatch(ctx context.Context, arg InsertRetryDispatchParams) error {
-	_, err := q.db.ExecContext(ctx, insertRetryDispatch, arg.ID, arg.RunID)
+	_, err := q.db.ExecContext(ctx, insertRetryDispatch, arg.ID, arg.Message, arg.RunID)
 	return err
 }
 

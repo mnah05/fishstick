@@ -3,8 +3,8 @@
 This document records the states and transitions currently represented by
 Fishstick. The migrations are authoritative for persisted values. API behavior
 is implemented in `internal/api`. The scheduler in `cmd/schedular` creates
-due occurrences; `cmd/relay` publishes dispatch events and `cmd/worker` owns
-execution transitions and exhausted-run dead-letter insertion.
+due occurrences; `cmd/relay` publishes dispatch events; `cmd/worker` owns run
+claims and handler outcomes; and `cmd/watcher` recovers expired worker leases.
 
 ## Job definitions
 
@@ -89,14 +89,16 @@ writer.
 | From | To | Current owner / condition |
 | --- | --- | --- |
 | `QUEUED`, due `RETRY_WAIT` | `RUNNING` | `cmd/worker`, after locking the job row |
-| expired `RUNNING` | `RUNNING` with a new fencing token | `cmd/worker` lease reclaim |
+| expired `RUNNING` | `RUNNING` with a new fencing token | `cmd/worker` when a dispatch is already being handled |
+| expired `RUNNING` below max attempts | `RETRY_WAIT` + delayed dispatch | `cmd/watcher`, same transaction |
+| expired `RUNNING` at max attempts | `FAILED` + `OPEN` DLQ entry | `cmd/watcher`, same transaction |
 | `QUEUED`, `RETRY_WAIT` | `CANCELLED` | `cmd/api` cancel endpoint |
 | `RUNNING` | `CANCEL_REQUESTED` | Implemented by cancel API |
 | `RUNNING` | `SUCCEEDED`, `FAILED`, `RETRY_WAIT` | `cmd/worker` completion queries |
 | `CANCEL_REQUESTED` | `CANCELLED` | `cmd/worker` cooperative completion |
 | expired `CANCEL_REQUESTED` | `CANCELLED` | `cmd/worker` lease recovery |
 | failed `RUNNING` below max attempts | `RETRY_WAIT` + delayed dispatch | `cmd/worker`, same transaction |
-| exhausted `RUNNING` | `FAILED` + `OPEN` DLQ entry | `cmd/worker`, same transaction |
+| exhausted handler failure | `FAILED` + `OPEN` DLQ entry | `cmd/worker`, same transaction |
 
 `SUCCEEDED`, `FAILED`, and `CANCELLED` are terminal. Re-cancelling
 `CANCEL_REQUESTED` is idempotent. Cancelling a terminal run returns conflict.
@@ -104,6 +106,24 @@ The API classification lives in `internal/api/status.go`; `CancelRun` in
 `internal/database/sqlc/queries/job_runs.sql` applies the corresponding update
 to pre-run and `RUNNING` states. Worker completions require the current worker
 ID and fencing token, so stale workers cannot overwrite a later claim.
+
+### Lease watcher
+
+`cmd/watcher` polls `RUNNING` rows whose `lease_expires_at` is NULL or due.
+For each candidate it starts a transaction, locks the job before the run (the
+worker claim lock order), and rechecks eligibility in the conditional update.
+Attempts remaining move to `RETRY_WAIT`, set `retry_at` from the run's
+snapshotted retry delay, clear the prior worker and lease, and insert the delayed
+`JOB_DISPATCH` outbox row. Exhausted attempts move to `FAILED`, clear the worker
+and lease, and insert the `OPEN` DLQ row. State and side effect commit together;
+the relay later publishes retry dispatches. Expired `CANCEL_REQUESTED` runs
+remain owned by worker cancellation recovery.
+
+The watcher does not increment attempts: the worker increments
+`attempt_count` when it claims the next execution. Conditional state updates
+ensure a heartbeat, completion, or competing watcher that wins the row lock
+prevents duplicate recovery. A stale handler cannot complete because its run
+has left `RUNNING`; a subsequent claim also advances the fencing token.
 
 ## Job update versus run claim
 
@@ -132,8 +152,9 @@ INFLIGHT (expired lock) -> INFLIGHT (reclaimed by another relay)
 ## Dead-letter resolution
 
 The schema in `00001_initial_schema.sql` allows `OPEN`, `RETRIED`, and
-`RESOLVED`. `cmd/worker` writes `OPEN` when attempts are exhausted or a final
-lease expires. The API exposes list/get. `OPEN -> RETRIED` and `OPEN ->
+`RESOLVED`. `cmd/worker` writes `OPEN` when handler attempts are exhausted;
+`cmd/watcher` writes `OPEN` when an expired lease has exhausted attempts. The
+API exposes list/get. `OPEN -> RETRIED` and `OPEN ->
 RESOLVED` remain unwritten because manual resolution is deferred.
 
 ## Request and process control

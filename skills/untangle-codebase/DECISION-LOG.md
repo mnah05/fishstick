@@ -32,3 +32,84 @@ Scope: fishstick MVP as described in the Notion page and current repository docs
 ## Tests
 
 Existing tests are relevant behavior checks: API validation and routing, scheduling semantics, partial update merging, idempotency/cancellation behavior, plus opt-in PostgreSQL integration for transactions, concurrency, and rollback. Keep them as regression coverage; do not delete tests that exercise these contracts.
+
+## Untangle pass: lease watcher and runtime integration
+
+Inventory covered the API, scheduler, relay, worker, watcher, SQLC query sources,
+configuration, process setup, and integration-test helpers. Existing worktree
+changes for the watcher and its documentation are part of the baseline and must
+remain intact.
+
+### Findings and redesign decisions
+
+- **Repeated polling runtime:** scheduler and watcher each own almost identical
+  database `/healthz`, ticker, shutdown, and logging loops. Move this shared
+  lifecycle into one small polling runner; leave `processDueJobs` and
+  `processBatch` in their owning commands.
+- **Repeated process config parsing:** scheduler/watcher duplicate Koanf load,
+  blank override checks, decoding, and validation; relay/worker already use a
+  prefix-based loader. Route all process config parsing through the shared
+  loader while retaining process-specific defaults, types, and validation.
+- **Repeated dispatch schema:** the `{"run_id": ...}` contract is built by API,
+  scheduler and SQL, then decoded separately by worker. Give the message shape
+  one Go type and encoder/decoder; pass encoded message data into SQLC queries
+  instead of constructing the JSON object in SQL.
+- **Implicit transaction and lock protocol:** handlers and worker lifecycle
+  code manually bind SQLC to transactions, and worker/watcher repeat
+  job-before-run locking. Put transaction binding and the job/run lock sequence
+  behind the database package boundary so callers cannot accidentally reverse
+  the protocol.
+- **Repeated AMQP topology:** relay and worker independently declare the same
+  exchange, queue, and binding. Share that protocol in the messaging package;
+  keep publisher confirms, QoS, publishing, and consumption at their owners.
+- **Repeated isolated-database test setup:** API, relay, scheduler, worker, and
+  watcher tests repeat schema creation, search_path, migrations, and cleanup.
+  Move that fixture into `internal/testsupport`, retaining API-specific
+  statement timeout and application-name settings.
+- **Process identity collision:** relay claims use the configured static owner
+  ID, and worker IDs only append hostname. Use a shared per-process identity
+  that includes a unique instance token, preserving the configured label for
+  logs and operations.
+- **Suppressed delivery errors:** relay records publish errors in PostgreSQL
+  but suppresses them from process logs after successful release; worker
+  discards AMQP ack/nack errors. Surface these errors without changing retry,
+  acknowledgment, or database state transitions.
+- **API/persistence coupling:** API handlers and response DTOs use generated
+  SQLC rows. Keep the existing explicit response mapping because it protects
+  the HTTP contract. Do not add an extra domain/persistence layer without a
+  concrete caller that benefits from it. The worker handler is internal to the
+  worker command; its SQLC model parameter is not currently a public extension
+  contract, so leave it alone in this pass.
+- **Necessary special cases:** preserve job-before-run locks, conditional
+  updates, transaction-plus-outbox/DLQ atomicity, fencing, cancellation
+  handling, retry/backoff timing, `OptionalTime` tri-state semantics, null
+  mapping, SQLC-generated files, and the API/migration `run` test seams. These
+  represent observable contracts or concurrency guards.
+- **Potentially swallowed but low-value errors:** HTTP response body write
+  failures and test cleanup errors remain best-effort; do not turn ordinary
+  client disconnects or cleanup failures into new lifecycle behavior.
+
+The comments/tests preference was requested before editing. Preserve all
+behavioral tests and comments unless the user selects the corresponding cleanup
+work; adapt tests only where a code refactor requires signature or fixture
+updates.
+
+### Implemented
+
+- Added `internal/process.RunPoller` and moved scheduler/watcher health,
+  polling, and shutdown lifecycle into it.
+- Unified environment loading and polling defaults/validation while retaining
+  process-specific config types and names.
+- Added the shared dispatch payload and RabbitMQ topology helpers in
+  `internal/messaging`.
+- Added transaction-bound SQLC queries and a shared job-before-run lock helper
+  in `internal/database`.
+- Added unique per-process instance IDs and surfaced relay publish and worker
+  delivery-settlement errors.
+- Centralized isolated PostgreSQL setup in `internal/testsupport` and updated
+  relevant command and API docs.
+- Left optional comment/test deletion untouched; behavioral tests were kept
+  and adjusted only for shared helpers and fixtures.
+
+Verification: `go test ./...` passed and `git diff --check` passed. PostgreSQL
+integration tests follow the repository's opt-in test database configuration.

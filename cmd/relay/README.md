@@ -6,6 +6,10 @@ JSON to RabbitMQ, waits for broker confirms, then records `PUBLISHED`. A publish
 failure returns the row to `PENDING` with bounded backoff. Expired locks can be
 claimed by another relay process.
 
+Retry dispatch rows are written transactionally by the worker after handler
+failures and by the lease watcher after expired worker leases. The relay uses
+their `available_at` time so retries are not published before `retry_at`.
+
 Set `DATABASE_URL` and the `RELAY_*` variables in
 [`internal/config/.env.example`](../../internal/config/.env.example). The relay
 declares a durable exchange and worker queue before polling. It exits at startup

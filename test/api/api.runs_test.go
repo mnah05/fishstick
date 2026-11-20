@@ -295,7 +295,7 @@ func TestCancelRunPostgresIntegration(t *testing.T) {
 	// Running → CANCEL_REQUESTED (202)
 	runID := insertTestRun(t, db, jobID, "QUEUED")
 	tx := holdJobLock(t, db, jobID)
-	q := sqlc.New(db).WithTx(tx)
+	q := sqlc.New(tx)
 	if _, err := q.ClaimRunToRunning(ctx, sqlc.ClaimRunToRunningParams{
 		ID:    runID,
 		JobID: jobID,

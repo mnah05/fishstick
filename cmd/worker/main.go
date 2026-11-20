@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -15,14 +14,13 @@ import (
 	"github.com/fishstick/internal/config"
 	"github.com/fishstick/internal/database"
 	"github.com/fishstick/internal/database/sqlc"
+	"github.com/fishstick/internal/instanceid"
+	"github.com/fishstick/internal/messaging"
 	"github.com/fishstick/internal/runstatus"
 	"github.com/google/uuid"
 	"github.com/rabbitmq/amqp091-go"
 )
 
-type dispatchMessage struct {
-	RunID string `json:"run_id"`
-}
 type Handler func(context.Context, sqlc.JobRun) ([]byte, error)
 
 // The development handler succeeds with an empty result. Deployments should
@@ -44,27 +42,27 @@ func developmentHandler(delay time.Duration) Handler {
 	}
 }
 
-func uniqueWorkerID(base string) string {
-	host, err := os.Hostname()
-	if err != nil || host == "" {
-		return base
+func settleDelivery(logger *slog.Logger, delivery amqp091.Delivery, acknowledge, requeue bool) {
+	var err error
+	if acknowledge {
+		err = delivery.Ack(false)
+	} else {
+		err = delivery.Nack(false, requeue)
 	}
-	return base + "-" + host
+	if err != nil {
+		logger.Error("settle RabbitMQ delivery", "acknowledge", acknowledge, "requeue", requeue, "error", err)
+	}
 }
 
 func claimRun(ctx context.Context, db *sql.DB, runID uuid.UUID, workerID string, lease time.Duration) (sqlc.JobRun, error) {
 	// [1] Lock the job before the run, matching API job-update serialization.
 	// The SQL claim increments fencing_token so a reclaimed lease rejects old workers.
-	tx, err := db.BeginTx(ctx, nil)
+	tx, q, err := database.BeginQueries(ctx, db, nil)
 	if err != nil {
 		return sqlc.JobRun{}, err
 	}
 	defer tx.Rollback()
-	q := sqlc.New(db).WithTx(tx)
-	if _, err = q.GetJobForRunUpdate(ctx, runID); err != nil {
-		return sqlc.JobRun{}, err
-	}
-	run, err := q.GetJobRunByIDForUpdate(ctx, runID)
+	run, err := database.LockJobRunForUpdate(ctx, q, runID)
 	if err != nil {
 		return sqlc.JobRun{}, err
 	}
@@ -215,12 +213,11 @@ func finishRun(ctx context.Context, db *sql.DB, run sqlc.JobRun, workerID string
 		}
 		return nil
 	}
-	tx, err := db.BeginTx(ctx, nil)
+	tx, qtx, err := database.BeginQueries(ctx, db, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	qtx := q.WithTx(tx)
 	// [5] Retry scheduling or permanent failure plus its DLQ row commit together.
 	message := sql.NullString{String: handlerErr.Error(), Valid: true}
 	n, err := qtx.ScheduleRunRetry(ctx, sqlc.ScheduleRunRetryParams{ID: run.ID, WorkerID: owner, FencingToken: run.FencingToken, LastError: message})
@@ -250,7 +247,11 @@ func finishRun(ctx context.Context, db *sql.DB, run sqlc.JobRun, workerID string
 		if err != nil {
 			return fmt.Errorf("generate retry outbox id: %w", err)
 		}
-		if err = qtx.InsertRetryDispatch(ctx, sqlc.InsertRetryDispatchParams{ID: retryEventID, RunID: run.ID}); err != nil {
+		dispatchBody, err := messaging.EncodeDispatch(run.ID)
+		if err != nil {
+			return fmt.Errorf("encode retry dispatch: %w", err)
+		}
+		if err = qtx.InsertRetryDispatch(ctx, sqlc.InsertRetryDispatchParams{ID: retryEventID, RunID: run.ID, Message: dispatchBody}); err != nil {
 			return fmt.Errorf("enqueue retry dispatch: %w", err)
 		}
 	}
@@ -260,12 +261,11 @@ func finishRun(ctx context.Context, db *sql.DB, run sqlc.JobRun, workerID string
 func failExpiredRun(ctx context.Context, db *sql.DB, runID uuid.UUID) error {
 	// [6] A crashed worker on its final try has no handler left to report failure.
 	// The lease guard and DLQ insert run in one transaction when its message returns.
-	tx, err := db.BeginTx(ctx, nil)
+	tx, q, err := database.BeginQueries(ctx, db, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	q := sqlc.New(db).WithTx(tx)
 	n, err := q.FailExpiredRun(ctx, runID)
 	if err != nil {
 		return err
@@ -280,12 +280,11 @@ func failExpiredRun(ctx context.Context, db *sql.DB, runID uuid.UUID) error {
 }
 
 func completeExpiredCancellation(ctx context.Context, db *sql.DB, runID uuid.UUID) error {
-	tx, err := db.BeginTx(ctx, nil)
+	tx, q, err := database.BeginQueries(ctx, db, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	q := sqlc.New(db).WithTx(tx)
 	n, err := q.CompleteExpiredRunCancelled(ctx, runID)
 	if err != nil {
 		return err
@@ -309,7 +308,7 @@ func main() {
 		logger.Error("load worker config", "error", err)
 		os.Exit(1)
 	}
-	workerID := uniqueWorkerID(cfg.WorkerID)
+	workerID := instanceid.New(cfg.WorkerID)
 	handlers["*"] = developmentHandler(cfg.StubDelay)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -331,17 +330,9 @@ func main() {
 		os.Exit(1)
 	}
 	defer ch.Close()
-	if err = ch.ExchangeDeclare(cfg.Exchange, "direct", true, false, false, false, nil); err != nil {
-		logger.Error("declare exchange", "error", err)
-		os.Exit(1)
-	}
-	queue, err := ch.QueueDeclare(cfg.Queue, true, false, false, false, nil)
+	queue, err := messaging.DeclareDispatchQueue(ch, cfg.Exchange, cfg.Queue, cfg.RoutingKey)
 	if err != nil {
-		logger.Error("declare queue", "error", err)
-		os.Exit(1)
-	}
-	if err = ch.QueueBind(queue.Name, cfg.RoutingKey, cfg.Exchange, false, nil); err != nil {
-		logger.Error("bind queue", "error", err)
+		logger.Error("declare dispatch queue", "error", err)
 		os.Exit(1)
 	}
 	if err = ch.Qos(cfg.Prefetch, 0, false); err != nil {
@@ -364,22 +355,18 @@ func main() {
 				logger.Error("RabbitMQ consumer stopped")
 				return
 			}
-			var message dispatchMessage
-			if err := json.Unmarshal(delivery.Body, &message); err != nil {
-				_ = delivery.Nack(false, false)
-				continue
-			}
-			runID, err := uuid.Parse(message.RunID)
+			runID, err := messaging.DecodeDispatch(delivery.Body)
 			if err != nil {
-				_ = delivery.Nack(false, false)
+				logger.Error("decode dispatch message", "error", err)
+				settleDelivery(logger, delivery, false, false)
 				continue
 			}
 			run, err := sqlc.New(db).GetJobRunByID(ctx, runID)
 			if err != nil {
 				if errors.Is(err, sql.ErrNoRows) {
-					_ = delivery.Ack(false)
+					settleDelivery(logger, delivery, true, false)
 				} else {
-					_ = delivery.Nack(false, true)
+					settleDelivery(logger, delivery, false, true)
 				}
 				continue
 			}
@@ -389,9 +376,9 @@ func main() {
 			}
 			if err := processRun(ctx, db, runID, workerID, cfg.LeaseDuration, cfg.HeartbeatInterval, cfg.ShutdownGrace, handler); err != nil {
 				logger.Error("run processing failed", "run_id", runID, "error", err)
-				_ = delivery.Nack(false, true)
+				settleDelivery(logger, delivery, false, true)
 			} else {
-				_ = delivery.Ack(false)
+				settleDelivery(logger, delivery, true, false)
 			}
 		}
 	}

@@ -130,9 +130,9 @@ func (s *server) listDeadLetters(c echo.Context) error {
 }
 
 func (s *server) getDeadLetter(c echo.Context) error {
-	id, ok := pathUUID(c, "run_id")
-	if !ok {
-		return nil
+	id, err := pathUUID(c, "run_id")
+	if err != nil {
+		return err
 	}
 	row, err := s.queries.GetDeadLetter(c.Request().Context(), id)
 	if err != nil {

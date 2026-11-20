@@ -105,3 +105,34 @@ func TestValidateZeroPoolSettings(t *testing.T) {
 		t.Fatal("nil config must be rejected")
 	}
 }
+
+func TestNewWatcherConfigDefaultsAndValidation(t *testing.T) {
+	for _, key := range []string{"WATCHER_INTERVAL", "WATCHER_BATCH_SIZE", "WATCHER_SHUTDOWN_GRACE", "WATCHER_HEALTH_ADDRESS"} {
+		t.Setenv(key, "")
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg, err := config.NewWatcherConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := config.WatcherConfig{Interval: 5 * time.Second, BatchSize: 100, ShutdownGrace: 10 * time.Second, HealthAddress: ":8082"}
+	if *cfg != want {
+		t.Fatalf("configuration = %+v, want %+v", cfg, want)
+	}
+	for _, tt := range []struct{ key, value, message string }{
+		{"WATCHER_INTERVAL", "0s", "WATCHER_INTERVAL"},
+		{"WATCHER_BATCH_SIZE", "0", "WATCHER_BATCH_SIZE"},
+		{"WATCHER_SHUTDOWN_GRACE", "-1s", "WATCHER_SHUTDOWN_GRACE"},
+		{"WATCHER_HEALTH_ADDRESS", " ", "WATCHER_HEALTH_ADDRESS"},
+	} {
+		t.Run(tt.key, func(t *testing.T) {
+			t.Setenv(tt.key, tt.value)
+			got, err := config.NewWatcherConfig()
+			if err == nil || got != nil || !strings.Contains(err.Error(), tt.message) {
+				t.Fatalf("NewWatcherConfig() = (%+v, %v), want error containing %q", got, err, tt.message)
+			}
+		})
+	}
+}

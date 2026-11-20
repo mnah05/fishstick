@@ -2,61 +2,17 @@ package api_test
 
 import (
 	"database/sql"
-	"net/url"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/fishstick/internal/database"
 	"github.com/fishstick/internal/testsupport"
-	"github.com/google/uuid"
-	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 // Each integration test gets its own schema, including tables and test triggers.
 func newIntegrationDB(t *testing.T) *sql.DB {
-	t.Helper()
-	rawURL := testsupport.DatabaseURL(t)
-	u, err := url.Parse(rawURL)
-	if err != nil || (u.Scheme != "postgres" && u.Scheme != "postgresql") {
-		t.Fatal("TEST_DATABASE_URL must be a postgres:// or postgresql:// URL")
-	}
-	admin, err := sql.Open("pgx", rawURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := admin.Close(); err != nil {
-			t.Error(err)
-		}
+	return testsupport.IsolatedPostgresDB(t, "api_test", map[string]string{
+		"statement_timeout": "10000",
 	})
-	schema := "api_test_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	if _, err := admin.Exec("CREATE SCHEMA " + schema); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if _, err := admin.Exec("DROP SCHEMA " + schema + " CASCADE"); err != nil {
-			t.Error(err)
-		}
-	})
-	q := u.Query()
-	q.Set("search_path", schema)
-	q.Set("application_name", schema)
-	q.Set("statement_timeout", "10000")
-	u.RawQuery = q.Encode()
-	db, err := sql.Open("pgx", u.String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := db.Close(); err != nil {
-			t.Error(err)
-		}
-	})
-	if err := database.RunMigrations(db, "up"); err != nil {
-		t.Fatal(err)
-	}
-	return db
 }
 
 // Observe actual database lock waits, rather than guessing goroutine timing.

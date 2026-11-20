@@ -3,11 +3,9 @@ package main
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -16,6 +14,8 @@ import (
 	"github.com/fishstick/internal/config"
 	"github.com/fishstick/internal/database"
 	"github.com/fishstick/internal/database/sqlc"
+	"github.com/fishstick/internal/messaging"
+	"github.com/fishstick/internal/process"
 	"github.com/fishstick/internal/schedule"
 	"github.com/google/uuid"
 )
@@ -63,63 +63,21 @@ func main() {
 	}
 	defer db.Close()
 
-	// [3] Start a health endpoint that reports whether PostgreSQL is reachable.
-	// Readiness follows database availability: a live process that cannot reach
-	// its persistence layer is not ready to schedule work.
-	health := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/healthz" {
-			http.NotFound(w, r)
-			return
+	err = process.RunPoller(ctx, db, logger, process.PollerConfig{
+		Name: "scheduler", Interval: schedCfg.Interval, BatchSize: schedCfg.BatchSize,
+		ShutdownGrace: schedCfg.ShutdownGrace, HealthAddress: schedCfg.HealthAddress,
+	}, func(ctx context.Context, batchSize int) (int, error) {
+		return processDueJobs(ctx, db, batchSize, time.Now().UTC())
+	}, func(count int, err error) {
+		if err != nil && ctx.Err() == nil {
+			logger.Error("scheduler poll failed", "error", err)
 		}
-		pingCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-		defer cancel()
-		if err := db.PingContext(pingCtx); err != nil {
-			http.Error(w, "database unavailable", http.StatusServiceUnavailable)
-			return
+		if count > 0 {
+			logger.Info("scheduled occurrences created", "count", count)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
-	server := &http.Server{Addr: schedCfg.HealthAddress, Handler: health, ReadHeaderTimeout: 5 * time.Second}
-	// A buffered channel lets the listener report a fatal error without waiting
-	// for the scheduler loop to be selecting on it at that exact moment.
-	serverErr := make(chan error, 1)
-	go func() {
-		logger.Info("scheduler health endpoint listening", "address", schedCfg.HealthAddress)
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			serverErr <- err
-		}
-	}()
-
-	// [4] Poll on a ticker; each pass handles at most one configured batch.
-	logger.Info("scheduler started", "interval", schedCfg.Interval, "batch_size", schedCfg.BatchSize)
-	// A ticker avoids overlapping poll goroutines: a slow poll finishes before
-	// the loop starts the next one.
-	ticker := time.NewTicker(schedCfg.Interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), schedCfg.ShutdownGrace)
-			defer cancel()
-			if err := server.Shutdown(shutdownCtx); err != nil {
-				logger.Error("shutdown health endpoint", "error", err)
-			}
-			logger.Info("scheduler stopped")
-			return
-		case err := <-serverErr:
-			logger.Error("health endpoint failed", "error", err)
-			return
-		case <-ticker.C:
-			// [5] Find due jobs and create their occurrence records atomically.
-			count, err := processDueJobs(ctx, db, schedCfg.BatchSize, time.Now().UTC())
-			if err != nil && ctx.Err() == nil {
-				logger.Error("scheduler poll failed", "error", err)
-			}
-			if count > 0 {
-				logger.Info("scheduled occurrences created", "count", count)
-			}
-		}
+	if err != nil {
+		logger.Error("scheduler stopped", "error", err)
 	}
 }
 
@@ -127,15 +85,14 @@ func processDueJobs(ctx context.Context, db *sql.DB, batchSize int, now time.Tim
 	// [6] Begin one transaction for this batch. Its row locks stay held until
 	// the batch commits. Each job uses a savepoint so one bad schedule rolls
 	// back only that occurrence and leaves it due.
-	tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	tx, qtx, err := database.BeginQueries(ctx, db, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return 0, fmt.Errorf("begin scheduler transaction: %w", err)
 	}
 	defer tx.Rollback()
-	// [7] Use sqlc to select due rows and lock them with FOR UPDATE SKIP LOCKED.
+	// [7] Select due rows and lock them with FOR UPDATE SKIP LOCKED.
 	// sqlc binds generated query methods to this transaction. The generated
 	// query uses SKIP LOCKED, so competing schedulers take different rows.
-	qtx := sqlc.New(db).WithTx(tx)
 	jobs, err := qtx.ListDueScheduledJobs(ctx, sqlc.ListDueScheduledJobsParams{
 		Now:       sql.NullTime{Time: now, Valid: true},
 		BatchSize: int32(batchSize),
@@ -235,7 +192,7 @@ func createOccurrence(ctx context.Context, qtx *sqlc.Queries, job dueJob, now ti
 	if err != nil {
 		return fmt.Errorf("read scheduled run: %w", err)
 	}
-	message, err := json.Marshal(map[string]string{"run_id": actualRunID.String()})
+	message, err := messaging.EncodeDispatch(actualRunID)
 	if err != nil {
 		return fmt.Errorf("encode dispatch message: %w", err)
 	}

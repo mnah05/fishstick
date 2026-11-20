@@ -26,7 +26,7 @@ values and transition owners.
 | GET | `/v1/dlq` | `200` with filtered, paginated dead-letter entries |
 | GET | `/v1/dlq/:run_id` | `200` with one dead-letter entry (404 if missing) |
 
-The scheduler, outbox relay, and worker are separate processes.
+The scheduler, outbox relay, worker, and lease watcher are separate processes.
 
 ## Create a job
 

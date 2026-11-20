@@ -1,5 +1,9 @@
 # End-to-end run results
 
+The recorded throughput run predates the lease watcher. The current E2E Compose
+stack also starts `cmd/watcher`; the recorded run did not measure expired-lease
+recovery.
+
 Run date: 2026-11-16 (UTC)
 
 ## Setup

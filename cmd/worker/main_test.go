@@ -4,47 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"net/url"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/fishstick/internal/database"
 	"github.com/fishstick/internal/database/sqlc"
 	"github.com/fishstick/internal/testsupport"
 	"github.com/google/uuid"
-	_ "github.com/jackc/pgx/v5/stdlib"
 )
-
-func workerTestDB(t *testing.T) *sql.DB {
-	t.Helper()
-	raw := testsupport.DatabaseURL(t)
-	u, err := url.Parse(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	admin, err := sql.Open("pgx", raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	schema := "worker_test_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	if _, err = admin.Exec("CREATE SCHEMA " + schema); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _, _ = admin.Exec("DROP SCHEMA " + schema + " CASCADE"); _ = admin.Close() })
-	q := u.Query()
-	q.Set("search_path", schema)
-	u.RawQuery = q.Encode()
-	db, err := sql.Open("pgx", u.String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	if err = database.RunMigrations(db, "up"); err != nil {
-		t.Fatal(err)
-	}
-	return db
-}
 
 func seedRun(t *testing.T, db *sql.DB, maxAttempts int) (uuid.UUID, uuid.UUID) {
 	t.Helper()
@@ -63,7 +29,7 @@ func seedRun(t *testing.T, db *sql.DB, maxAttempts int) (uuid.UUID, uuid.UUID) {
 
 func TestProcessRunSuccessAndRetryExhaustion(t *testing.T) {
 	t.Run("success stores result and fencing fields", func(t *testing.T) {
-		db := workerTestDB(t)
+		db := testsupport.IsolatedPostgresDB(t, "worker_test", nil)
 		_, runID := seedRun(t, db, 2)
 		err := processRun(context.Background(), db, runID, "worker-a", time.Second, time.Hour, time.Second, func(context.Context, sqlc.JobRun) ([]byte, error) { return []byte(`{"ok":true}`), nil })
 		if err != nil {
@@ -81,7 +47,7 @@ func TestProcessRunSuccessAndRetryExhaustion(t *testing.T) {
 		}
 	})
 	t.Run("last failure writes DLQ atomically", func(t *testing.T) {
-		db := workerTestDB(t)
+		db := testsupport.IsolatedPostgresDB(t, "worker_test", nil)
 		_, runID := seedRun(t, db, 2)
 		fail := func(context.Context, sqlc.JobRun) ([]byte, error) { return nil, errors.New("planned failure") }
 		if err := processRun(context.Background(), db, runID, "worker-a", time.Second, time.Hour, time.Second, fail); err != nil {
@@ -113,7 +79,7 @@ func TestProcessRunSuccessAndRetryExhaustion(t *testing.T) {
 
 func TestProcessRunCancellationAndExpiredLeaseFencing(t *testing.T) {
 	t.Run("cooperative cancel becomes terminal", func(t *testing.T) {
-		db := workerTestDB(t)
+		db := testsupport.IsolatedPostgresDB(t, "worker_test", nil)
 		_, runID := seedRun(t, db, 2)
 		done := make(chan error, 1)
 		go func() {
@@ -151,7 +117,7 @@ func TestProcessRunCancellationAndExpiredLeaseFencing(t *testing.T) {
 	})
 
 	t.Run("expired lease can be reclaimed and fences old handler", func(t *testing.T) {
-		db := workerTestDB(t)
+		db := testsupport.IsolatedPostgresDB(t, "worker_test", nil)
 		_, runID := seedRun(t, db, 3)
 		release := make(chan struct{})
 		done := make(chan error, 1)
@@ -196,7 +162,7 @@ func TestProcessRunCancellationAndExpiredLeaseFencing(t *testing.T) {
 }
 
 func TestExpiredFinalAttemptCreatesDeadLetterOnce(t *testing.T) {
-	db := workerTestDB(t)
+	db := testsupport.IsolatedPostgresDB(t, "worker_test", nil)
 	_, runID := seedRun(t, db, 1)
 	if _, err := claimRun(context.Background(), db, runID, "worker-crashed", time.Second); err != nil {
 		t.Fatal(err)
@@ -221,7 +187,7 @@ func TestExpiredFinalAttemptCreatesDeadLetterOnce(t *testing.T) {
 }
 
 func TestRedeliveredMessageWaitsForLeaseThenReclaims(t *testing.T) {
-	db := workerTestDB(t)
+	db := testsupport.IsolatedPostgresDB(t, "worker_test", nil)
 	_, runID := seedRun(t, db, 3)
 	if _, err := claimRun(context.Background(), db, runID, "worker-crashed", 80*time.Millisecond); err != nil {
 		t.Fatal(err)
@@ -246,7 +212,7 @@ func TestRedeliveredMessageWaitsForLeaseThenReclaims(t *testing.T) {
 }
 
 func TestExpiredCancellationRecovery(t *testing.T) {
-	db := workerTestDB(t)
+	db := testsupport.IsolatedPostgresDB(t, "worker_test", nil)
 	_, runID := seedRun(t, db, 2)
 	if _, err := claimRun(context.Background(), db, runID, "worker-crashed", time.Second); err != nil {
 		t.Fatal(err)

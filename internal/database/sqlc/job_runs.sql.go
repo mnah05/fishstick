@@ -245,7 +245,7 @@ UPDATE job_runs SET status = 'FAILED',
     last_error = COALESCE(last_error, 'worker lease expired after max attempts'),
     finished_at = NOW(), lease_expires_at = NULL, worker_id = NULL
 WHERE id = $1 AND status = 'RUNNING'
-  AND (lease_expires_at IS NULL OR lease_expires_at < NOW())
+  AND (lease_expires_at IS NULL OR lease_expires_at <= NOW())
   AND attempt_count >= max_attempts
 `
 
@@ -602,6 +602,38 @@ func (q *Queries) JobRunStatusCounts(ctx context.Context, jobID uuid.UUID) ([]Jo
 	return items, nil
 }
 
+const listExpiredRunningRunIDs = `-- name: ListExpiredRunningRunIDs :many
+SELECT id
+FROM job_runs
+WHERE status = 'RUNNING'
+  AND (lease_expires_at IS NULL OR lease_expires_at <= NOW())
+ORDER BY lease_expires_at NULLS FIRST, id
+LIMIT $1
+`
+
+func (q *Queries) ListExpiredRunningRunIDs(ctx context.Context, batchSize int32) ([]uuid.UUID, error) {
+	rows, err := q.db.QueryContext(ctx, listExpiredRunningRunIDs, batchSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []uuid.UUID{}
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listJobRunsPage = `-- name: ListJobRunsPage :many
 SELECT id, job_id, retry_of_run_id, scheduled_for, trigger_source, trigger_idempotency_key, trigger_request_hash, event_type_snapshot, payload_snapshot, timeout_seconds, status, attempt_count, max_attempts, worker_id, fencing_token, lease_expires_at, heartbeat_at, retry_at, deadline_at, started_at, last_attempt_started_at, finished_at, cancel_requested_at, cancelled_at, cancel_reason, last_error, exit_code, result, created_at, updated_at, retry_delay_seconds
 FROM job_runs
@@ -831,6 +863,24 @@ func (q *Queries) ManualJobRun(ctx context.Context, arg ManualJobRunParams) (Job
 		&i.RetryDelaySeconds,
 	)
 	return i, err
+}
+
+const retryExpiredRun = `-- name: RetryExpiredRun :execrows
+UPDATE job_runs SET status = 'RETRY_WAIT',
+    last_error = COALESCE(last_error, 'worker lease expired'),
+    retry_at = NOW() + make_interval(secs => retry_delay_seconds),
+    lease_expires_at = NULL, worker_id = NULL
+WHERE id = $1 AND status = 'RUNNING'
+  AND (lease_expires_at IS NULL OR lease_expires_at <= NOW())
+  AND attempt_count < max_attempts
+`
+
+func (q *Queries) RetryExpiredRun(ctx context.Context, id uuid.UUID) (int64, error) {
+	result, err := q.db.ExecContext(ctx, retryExpiredRun, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const scheduleRunRetry = `-- name: ScheduleRunRetry :execrows

@@ -114,6 +114,29 @@ services:
         condition: service_healthy
     profiles: [e2e]
 
+  watcher:
+    image: fishstick/e2e:local
+    build:
+      context: ..
+      dockerfile: .docker/Dockerfile
+      target: runtime
+    command: ["/app/watcher"]
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/fishstick?sslmode=disable
+      WATCHER_INTERVAL: 250ms
+      WATCHER_BATCH_SIZE: 25
+      WATCHER_HEALTH_ADDRESS: :8082
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    profiles: [e2e]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8082/healthz"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 5s
+
   e2e:
     image: fishstick/e2e-tests:local
     build:
@@ -142,5 +165,7 @@ services:
         condition: service_started
       worker:
         condition: service_started
+      watcher:
+        condition: service_healthy
     profiles: [e2e]
     restart: "no"

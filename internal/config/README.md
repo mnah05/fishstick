@@ -4,10 +4,13 @@
 configuration to `database.NewPostgres`. Koanf loads defaults, overrides them
 with `DATABASE_*` environment variables, and validates the result.
 
-The scheduler, relay, and worker each load separate typed settings using
-`SCHEDULER_*`, `RELAY_*`, and `WORKER_*` variables. Their poll, lease, queue,
-and shutdown values are validated independently from database settings. The API
-does not need process-specific configuration.
+The scheduler, relay, worker, and lease watcher each load separate typed
+settings using `SCHEDULER_*`, `RELAY_*`, `WORKER_*`, and `WATCHER_*` variables.
+Their poll, lease, queue, and shutdown values are validated independently from
+database settings. The API does not need process-specific configuration.
+All environment loading, decoding, and empty-override checks use the same
+prefix-aware loader; scheduler and watcher share polling validation while
+keeping separate environment prefixes and health addresses.
 
 Export the variables shown in `.env.example` before starting the application.
 Dotenv files are not loaded automatically. The example connection URL is for
@@ -26,9 +29,13 @@ settings in `DATABASE_URL`.
 | `SCHEDULER_BATCH_SIZE` | `100` | Maximum due jobs selected in one polling transaction |
 | `SCHEDULER_SHUTDOWN_GRACE` | `10s` | Maximum time allowed for the health endpoint to shut down |
 | `SCHEDULER_HEALTH_ADDRESS` | `:8081` | Address for the scheduler's `/healthz` endpoint |
+| `WATCHER_INTERVAL` | `5s` | Time between scans for expired worker leases |
+| `WATCHER_BATCH_SIZE` | `100` | Maximum expired runs considered in one polling pass |
+| `WATCHER_SHUTDOWN_GRACE` | `10s` | Maximum time allowed for the health endpoint to shut down |
+| `WATCHER_HEALTH_ADDRESS` | `:8082` | Address for the watcher's `/healthz` endpoint |
 
 Durations use Go duration syntax, such as `250ms`, `5s`, or `30m`. Negative pool
 settings and idle limits above a nonzero open limit are rejected. An explicitly
 empty numeric or duration environment value is invalid; unset the variable to
-use its default. Scheduler durations and batch size must be positive, and an
-explicitly empty scheduler value is rejected too.
+use its default. Scheduler and watcher durations and batch sizes must be
+positive, and explicitly empty process values are rejected too.

@@ -29,6 +29,29 @@ type Handler func(context.Context, sqlc.JobRun) ([]byte, error)
 // register event-specific handlers for their own event types.
 var handlers = map[string]Handler{"*": func(context.Context, sqlc.JobRun) ([]byte, error) { return []byte(`{}`), nil }}
 
+func developmentHandler(delay time.Duration) Handler {
+	return func(ctx context.Context, _ sqlc.JobRun) ([]byte, error) {
+		if delay > 0 {
+			timer := time.NewTimer(delay)
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-timer.C:
+			}
+		}
+		return []byte(`{}`), nil
+	}
+}
+
+func uniqueWorkerID(base string) string {
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		return base
+	}
+	return base + "-" + host
+}
+
 func claimRun(ctx context.Context, db *sql.DB, runID uuid.UUID, workerID string, lease time.Duration) (sqlc.JobRun, error) {
 	// [1] Lock the job before the run, matching API job-update serialization.
 	// The SQL claim increments fencing_token so a reclaimed lease rejects old workers.
@@ -286,6 +309,8 @@ func main() {
 		logger.Error("load worker config", "error", err)
 		os.Exit(1)
 	}
+	workerID := uniqueWorkerID(cfg.WorkerID)
+	handlers["*"] = developmentHandler(cfg.StubDelay)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	db, err := database.NewPostgres(ctx, dbCfg)
@@ -323,12 +348,12 @@ func main() {
 		logger.Error("set consumer prefetch", "error", err)
 		os.Exit(1)
 	}
-	deliveries, err := ch.Consume(queue.Name, cfg.WorkerID, false, false, false, false, nil)
+	deliveries, err := ch.Consume(queue.Name, workerID, false, false, false, false, nil)
 	if err != nil {
 		logger.Error("start consumer", "error", err)
 		os.Exit(1)
 	}
-	logger.Info("worker started", "queue", queue.Name, "worker_id", cfg.WorkerID)
+	logger.Info("worker started", "queue", queue.Name, "worker_id", workerID)
 	// [8] Ack only after the database transition succeeds; requeue transient failures.
 	for {
 		select {
@@ -362,7 +387,7 @@ func main() {
 			if handler == nil {
 				handler = handlers["*"]
 			}
-			if err := processRun(ctx, db, runID, cfg.WorkerID, cfg.LeaseDuration, cfg.HeartbeatInterval, cfg.ShutdownGrace, handler); err != nil {
+			if err := processRun(ctx, db, runID, workerID, cfg.LeaseDuration, cfg.HeartbeatInterval, cfg.ShutdownGrace, handler); err != nil {
 				logger.Error("run processing failed", "run_id", runID, "error", err)
 				_ = delivery.Nack(false, true)
 			} else {

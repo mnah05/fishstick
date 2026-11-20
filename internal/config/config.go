@@ -45,6 +45,7 @@ type WorkerConfig struct {
 	LeaseDuration     time.Duration `koanf:"lease_duration"`
 	HeartbeatInterval time.Duration `koanf:"heartbeat_interval"`
 	ShutdownGrace     time.Duration `koanf:"shutdown_grace"`
+	StubDelay         time.Duration `koanf:"stub_delay"`
 	RabbitURL         string        `koanf:"rabbit_url"`
 	Exchange          string        `koanf:"exchange"`
 	Queue             string        `koanf:"queue"`
@@ -80,8 +81,8 @@ func NewRelayConfig() (*RelayConfig, error) {
 
 func NewWorkerConfig() (*WorkerConfig, error) {
 	c := &WorkerConfig{}
-	err := loadProcessConfig("WORKER_", map[string]any{"lease_duration": "60s", "heartbeat_interval": "15s", "shutdown_grace": "30s", "rabbit_url": "amqp://fishstick:fishstick@localhost:5672/", "exchange": "fishstick", "queue": "fishstick.worker", "routing_key": "job.dispatch", "prefetch": 1, "worker_id": "worker-1"}, c)
-	if err == nil && (c.LeaseDuration <= 0 || c.HeartbeatInterval <= 0 || c.HeartbeatInterval >= c.LeaseDuration || c.ShutdownGrace <= 0 || c.Queue == "" || c.Exchange == "" || c.RoutingKey == "" || c.Prefetch <= 0 || c.WorkerID == "") {
+	err := loadProcessConfig("WORKER_", map[string]any{"lease_duration": "60s", "heartbeat_interval": "15s", "shutdown_grace": "30s", "stub_delay": "0s", "rabbit_url": "amqp://fishstick:fishstick@localhost:5672/", "exchange": "fishstick", "queue": "fishstick.worker", "routing_key": "job.dispatch", "prefetch": 1, "worker_id": "worker-1"}, c)
+	if err == nil && (c.LeaseDuration <= 0 || c.HeartbeatInterval <= 0 || c.HeartbeatInterval >= c.LeaseDuration || c.ShutdownGrace <= 0 || c.StubDelay < 0 || c.Queue == "" || c.Exchange == "" || c.RoutingKey == "" || c.Prefetch <= 0 || c.WorkerID == "") {
 		err = fmt.Errorf("invalid worker configuration")
 	}
 	return c, err

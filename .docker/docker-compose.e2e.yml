@@ -1,0 +1,146 @@
+services:
+  rabbitmq-e2e:
+    image: rabbitmq:4-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: fishstick
+      RABBITMQ_DEFAULT_PASS: fishstick
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    profiles: [e2e]
+
+  migrate:
+    image: fishstick/e2e:local
+    build:
+      context: ..
+      dockerfile: .docker/Dockerfile
+      target: runtime
+    command: ["/app/migrate"]
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/fishstick?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles: [e2e]
+    restart: "no"
+
+  api:
+    image: fishstick/e2e:local
+    build:
+      context: ..
+      dockerfile: .docker/Dockerfile
+      target: runtime
+    command: ["/app/api"]
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/fishstick?sslmode=disable
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    profiles: [e2e]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/v1/health/db"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 5s
+
+  schedular:
+    image: fishstick/e2e:local
+    build:
+      context: ..
+      dockerfile: .docker/Dockerfile
+      target: runtime
+    command: ["/app/schedular"]
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/fishstick?sslmode=disable
+      SCHEDULER_INTERVAL: 100ms
+      SCHEDULER_BATCH_SIZE: 1
+      SCHEDULER_HEALTH_ADDRESS: :8081
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    profiles: [e2e]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8081/healthz"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 5s
+
+  relay:
+    image: fishstick/e2e:local
+    build:
+      context: ..
+      dockerfile: .docker/Dockerfile
+      target: runtime
+    command: ["/app/relay"]
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/fishstick?sslmode=disable
+      RELAY_INTERVAL: 100ms
+      RELAY_BATCH_SIZE: 25
+      RELAY_LOCK_TTL: 30s
+      RELAY_RABBIT_URL: amqp://fishstick:fishstick@rabbitmq-e2e:5672/
+      RELAY_QUEUE: fishstick.worker
+      RELAY_WORKER_ID: e2e-relay
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      rabbitmq-e2e:
+        condition: service_healthy
+    profiles: [e2e]
+
+  worker:
+    image: fishstick/e2e:local
+    build:
+      context: ..
+      dockerfile: .docker/Dockerfile
+      target: runtime
+    command: ["/app/worker"]
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/fishstick?sslmode=disable
+      WORKER_RABBIT_URL: amqp://fishstick:fishstick@rabbitmq-e2e:5672/
+      WORKER_QUEUE: fishstick.worker
+      WORKER_WORKER_ID: e2e-worker
+      WORKER_HEARTBEAT_INTERVAL: 2s
+      WORKER_LEASE_DURATION: 10s
+      WORKER_STUB_DELAY: "${WORKER_STUB_DELAY:-2s}"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      rabbitmq-e2e:
+        condition: service_healthy
+    profiles: [e2e]
+
+  e2e:
+    image: fishstick/e2e-tests:local
+    build:
+      context: ..
+      dockerfile: .docker/Dockerfile
+      target: test
+    environment:
+      API_URL: http://api:8080
+      E2E_DATABASE_URL: postgres://postgres:postgres@postgres:5432/fishstick?sslmode=disable
+      E2E_TIMEOUT: "${E2E_TIMEOUT:-600s}"
+      E2E_LOAD_BATCHES: "${E2E_LOAD_BATCHES:-}"
+      E2E_TARGET_RPS: "${E2E_TARGET_RPS:-}"
+      E2E_RATE_DURATION: "${E2E_RATE_DURATION:-10s}"
+      E2E_EXPECTED_WORKERS: "9"
+      RABBITMQ_MANAGEMENT_URL: http://rabbitmq-e2e:15672
+      RABBITMQ_USER: fishstick
+      RABBITMQ_PASSWORD: fishstick
+      TEST_DATABASE_URL: postgres://postgres:postgres@postgres:5432/fishstick?sslmode=disable
+      TEST_REQUIRE_DATABASE: "1"
+    depends_on:
+      api:
+        condition: service_healthy
+      schedular:
+        condition: service_healthy
+      relay:
+        condition: service_started
+      worker:
+        condition: service_started
+    profiles: [e2e]
+    restart: "no"

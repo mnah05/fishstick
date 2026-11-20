@@ -1,7 +1,6 @@
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: fishstick-postgres
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -20,7 +19,6 @@ services:
 
   rabbitmq:
     image: rabbitmq:4-management-alpine
-    container_name: fishstick-rabbitmq
     profiles: [messaging]
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-fishstick}

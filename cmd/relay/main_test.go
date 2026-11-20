@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"net/url"
 	"strings"
@@ -94,7 +96,16 @@ func TestProcessBatchReleasesFailureAndPublishesAfterRetry(t *testing.T) {
 	if err != nil || count != 1 {
 		t.Fatalf("successful publish = (%d,%v)", count, err)
 	}
-	if len(working.messages) != 1 || string(working.messages[0]) != string(body) {
+	var wantMessage, gotMessage bytes.Buffer
+	if len(working.messages) == 1 {
+		if err := json.Compact(&wantMessage, body); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Compact(&gotMessage, working.messages[0]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(working.messages) != 1 || !bytes.Equal(gotMessage.Bytes(), wantMessage.Bytes()) {
 		t.Fatalf("published messages=%q", working.messages)
 	}
 	if err = db.QueryRow(`SELECT status FROM outbox_events WHERE id=$1`, eventID).Scan(&status); err != nil {

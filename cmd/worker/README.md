@@ -15,7 +15,8 @@ Configure `DATABASE_*` and `WORKER_*` from
 development handler registered as `*` returns `{}` successfully for any event
 type. Replace it with event-specific handlers before using the worker to execute
 real jobs. Handler code must honor its context for cooperative cancellation and
-shutdown.
+shutdown. `WORKER_STUB_DELAY` slows this development handler for concurrency
+checks; it defaults to `0s` and should stay disabled for normal execution.
 
 The lifecycle functions are in [main.go](main.go). PostgreSQL integration tests
 cover success, retry exhaustion, cancellation, lease recovery, and fencing when

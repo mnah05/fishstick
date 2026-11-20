@@ -9,7 +9,7 @@ status name, and duplicated run-status literals across migration, API, and sqlc.
 events (optional later per `docs/cancellation.md`).
 
 **Reference docs today:** `docs/state-machines.md`, `docs/cancellation.md`,
-`docs/future-endpoints.md`, `internal/api/status.go`,
+`docs/dlq-api.md`, `internal/api/status.go`,
 `internal/database/sqlc/queries/job_runs.sql`.
 
 ---
@@ -198,7 +198,7 @@ snapshot columns already on `job_runs`.
    `resolution_status = 'OPEN'` in same txn as `FAILED` terminal (or dedicated
    `FailRunPermanent` query).
 2. **sqlc** — `InsertDeadLetter`, `ListDeadLetterPage`, `GetDeadLetter`.
-3. **API** — implement shapes in `docs/future-endpoints.md`:
+3. **API** — implement shapes in `docs/dlq-api.md`:
    - `GET /v1/dlq`, `GET /v1/dlq/:run_id`.
 4. **Resolver (minimal):** `OPEN` → `RESOLVED` via internal/admin query or
    deferred API; `OPEN` → `RETRIED` when manual re-trigger links `retry_run_id`

@@ -63,10 +63,12 @@ func main() {
 	}
 	defer db.Close()
 
+	// [3] Run the shared poller, which handles intervals, health checks, and shutdown.
 	err = process.RunPoller(ctx, db, logger, process.PollerConfig{
 		Name: "scheduler", Interval: schedCfg.Interval, BatchSize: schedCfg.BatchSize,
 		ShutdownGrace: schedCfg.ShutdownGrace, HealthAddress: schedCfg.HealthAddress,
 	}, func(ctx context.Context, batchSize int) (int, error) {
+		// [4] Take one UTC timestamp for this batch and process jobs due by that time.
 		return processDueJobs(ctx, db, batchSize, time.Now().UTC())
 	}, func(count int, err error) {
 		if err != nil && ctx.Err() == nil {
@@ -82,7 +84,7 @@ func main() {
 }
 
 func processDueJobs(ctx context.Context, db *sql.DB, batchSize int, now time.Time) (int, error) {
-	// [6] Begin one transaction for this batch. Its row locks stay held until
+	// [5] Begin one transaction for this batch. Its row locks stay held until
 	// the batch commits. Each job uses a savepoint so one bad schedule rolls
 	// back only that occurrence and leaves it due.
 	tx, qtx, err := database.BeginQueries(ctx, db, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
@@ -90,7 +92,7 @@ func processDueJobs(ctx context.Context, db *sql.DB, batchSize int, now time.Tim
 		return 0, fmt.Errorf("begin scheduler transaction: %w", err)
 	}
 	defer tx.Rollback()
-	// [7] Select due rows and lock them with FOR UPDATE SKIP LOCKED.
+	// [6] Select due rows and lock them with FOR UPDATE SKIP LOCKED.
 	// sqlc binds generated query methods to this transaction. The generated
 	// query uses SKIP LOCKED, so competing schedulers take different rows.
 	jobs, err := qtx.ListDueScheduledJobs(ctx, sqlc.ListDueScheduledJobsParams{
@@ -111,7 +113,7 @@ func processDueJobs(ctx context.Context, db *sql.DB, batchSize int, now time.Tim
 		if err := qtx.BeginSchedulerOccurrence(ctx); err != nil {
 			return 0, fmt.Errorf("begin job savepoint: %w", err)
 		}
-		// [8] Build the immutable snapshot that will be stored on this run.
+		// [7] Build the immutable snapshot that will be stored on this run.
 		occurrence := dueJob{
 			id: job.ID, eventType: job.EventType, payload: job.Payload,
 			scheduleType: job.ScheduleType, cronExpression: job.CronExpression,
@@ -133,7 +135,7 @@ func processDueJobs(ctx context.Context, db *sql.DB, batchSize int, now time.Tim
 		}
 		done++
 	}
-	// [9] Commit the occurrences that succeeded. Failed jobs stay due.
+	// [8] Commit the occurrences that succeeded. Failed jobs stay due.
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("commit scheduler transaction: %w", err)
 	}
@@ -141,7 +143,7 @@ func processDueJobs(ctx context.Context, db *sql.DB, batchSize int, now time.Tim
 }
 
 func createOccurrence(ctx context.Context, qtx *sqlc.Queries, job dueJob, now time.Time) error {
-	// [10] Calculate the schedule after this occurrence: clear ONCE jobs, while
+	// [9] Calculate the schedule after this occurrence: clear ONCE jobs, while
 	// cron jobs move directly to their next future tick after downtime.
 	var nextRun sql.NullTime
 	switch job.scheduleType {
@@ -164,7 +166,7 @@ func createOccurrence(ctx context.Context, qtx *sqlc.Queries, job dueJob, now ti
 		return fmt.Errorf("unsupported due schedule type %q", job.scheduleType)
 	}
 
-	// [11] Create (or reuse by unique occurrence key) the queued scheduled run.
+	// [10] Create (or reuse by unique occurrence key) the queued scheduled run.
 	runID, err := uuid.NewV7()
 	if err != nil {
 		return fmt.Errorf("generate run ID: %w", err)
@@ -185,7 +187,7 @@ func createOccurrence(ctx context.Context, qtx *sqlc.Queries, job dueJob, now ti
 	// Resolve the run by its unique occurrence key. This also finds the original
 	// ID when the insert hit the uniqueness guard, so the message points to the
 	// persisted run rather than a newly generated, unused ID.
-	// [12] Add one pending dispatch event that refers to the persisted run ID.
+	// [11] Add one pending dispatch event that refers to the persisted run ID.
 	actualRunID, err := qtx.GetScheduledRunID(ctx, sqlc.GetScheduledRunIDParams{
 		JobID: job.id, ScheduledFor: job.nextRunAt,
 	})
@@ -203,7 +205,7 @@ func createOccurrence(ctx context.Context, qtx *sqlc.Queries, job dueJob, now ti
 	}); err != nil {
 		return fmt.Errorf("insert dispatch outbox event: %w", err)
 	}
-	// [13] Advance the job only after its run and dispatch intent are recorded.
+	// [12] Advance the job only after its run and dispatch intent are recorded.
 	if err := qtx.AdvanceJobSchedule(ctx, sqlc.AdvanceJobScheduleParams{ID: job.id, NextRunAt: nextRun}); err != nil {
 		return fmt.Errorf("advance job schedule: %w", err)
 	}

@@ -20,13 +20,14 @@ import (
 )
 
 func recoverExpiredRun(ctx context.Context, db *sql.DB, runID uuid.UUID) (bool, error) {
+	// [7] Recover one expired run atomically so its status and retry dispatch cannot diverge.
 	tx, q, err := database.BeginQueries(ctx, db, nil)
 	if err != nil {
 		return false, fmt.Errorf("begin recovery transaction: %w", err)
 	}
 	defer tx.Rollback()
 
-	// Keep the same job-before-run lock order as worker claims and API updates.
+	// [8] Lock the job and run in the same order as worker claims and API updates.
 	run, err := database.LockJobRunForUpdate(ctx, q, runID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -39,6 +40,7 @@ func recoverExpiredRun(ctx context.Context, db *sql.DB, runID uuid.UUID) (bool, 
 	}
 
 	if run.AttemptCount >= run.MaxAttempts {
+		// [9] Exhausted runs are failed and copied to the dead-letter table.
 		n, err := q.FailExpiredRun(ctx, runID)
 		if err != nil {
 			return false, fmt.Errorf("fail expired run: %w", err)
@@ -50,6 +52,7 @@ func recoverExpiredRun(ctx context.Context, db *sql.DB, runID uuid.UUID) (bool, 
 			return false, fmt.Errorf("insert dead-letter entry: %w", err)
 		}
 	} else {
+		// [10] Otherwise schedule a retry and add its dispatch event to the outbox.
 		n, err := q.RetryExpiredRun(ctx, runID)
 		if err != nil {
 			return false, fmt.Errorf("schedule expired run retry: %w", err)
@@ -76,6 +79,7 @@ func recoverExpiredRun(ctx context.Context, db *sql.DB, runID uuid.UUID) (bool, 
 }
 
 func processBatch(ctx context.Context, db *sql.DB, batchSize int) (int, error) {
+	// [5] Find a bounded batch of running runs whose leases have expired.
 	ids, err := sqlc.New(db).ListExpiredRunningRunIDs(ctx, int32(batchSize))
 	if err != nil {
 		return 0, fmt.Errorf("list expired runs: %w", err)
@@ -83,6 +87,7 @@ func processBatch(ctx context.Context, db *sql.DB, batchSize int) (int, error) {
 	recovered := 0
 	var failures error
 	for _, id := range ids {
+		// [6] Recover each run independently so one failure does not block the rest.
 		ok, err := recoverExpiredRun(ctx, db, id)
 		if err != nil {
 			failures = errors.Join(failures, fmt.Errorf("recover run %s: %w", id, err))
@@ -96,6 +101,7 @@ func processBatch(ctx context.Context, db *sql.DB, batchSize int) (int, error) {
 }
 
 func main() {
+	// [1] Load database and watcher settings, then prepare structured logging.
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	dbCfg, err := config.NewConfig()
 	if err != nil {
@@ -109,6 +115,7 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// [2] Open PostgreSQL; the shared context also allows shutdown to cancel startup work.
 	db, err := database.NewPostgres(ctx, dbCfg)
 	if err != nil {
 		logger.Error("connect database", "error", err)
@@ -116,10 +123,12 @@ func main() {
 	}
 	defer db.Close()
 
+	// [3] Poll until shutdown; the poller also serves health and drains in-flight work.
 	err = process.RunPoller(ctx, db, logger, process.PollerConfig{
 		Name: "watcher", Interval: cfg.Interval, BatchSize: cfg.BatchSize,
 		ShutdownGrace: cfg.ShutdownGrace, HealthAddress: cfg.HealthAddress,
 	}, func(ctx context.Context, batchSize int) (int, error) {
+		// [4] Each poll runs a bounded batch of expired-lease recovery work.
 		return processBatch(ctx, db, batchSize)
 	}, func(count int, err error) {
 		if err != nil && ctx.Err() == nil {

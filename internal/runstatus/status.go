@@ -28,9 +28,3 @@ func Valid(status string) bool {
 func Terminal(status string) bool {
 	return status == Succeeded || status == Failed || status == Cancelled
 }
-
-// Claimable reports statuses that may be claimed. RUNNING requires an expired
-// lease; SQL checks that lease timestamp before allowing a reclaim.
-func Claimable(status string) bool {
-	return status == Queued || status == RetryWait || status == Running
-}

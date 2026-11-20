@@ -27,6 +27,23 @@ func (p *fakePublisher) Publish(_ context.Context, body []byte) error {
 	return nil
 }
 
+func TestBackoffCapsAtFiveMinutes(t *testing.T) {
+	for _, tc := range []struct {
+		attempts int32
+		want     time.Duration
+	}{
+		{attempts: 0, want: time.Second},
+		{attempts: 1, want: 2 * time.Second},
+		{attempts: 8, want: 256 * time.Second},
+		{attempts: 9, want: 5 * time.Minute},
+		{attempts: 100, want: 5 * time.Minute},
+	} {
+		if got := backoff(tc.attempts); got != tc.want {
+			t.Errorf("backoff(%d) = %s, want %s", tc.attempts, got, tc.want)
+		}
+	}
+}
+
 func TestProcessBatchReleasesFailureAndPublishesAfterRetry(t *testing.T) {
 	db := testsupport.IsolatedPostgresDB(t, "relay_test", nil)
 	ctx := context.Background()

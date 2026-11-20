@@ -4,7 +4,9 @@ The relay owns the `PENDING`/`INFLIGHT`/`PUBLISHED` outbox transitions. It
 claims dispatch batches with `FOR UPDATE SKIP LOCKED`, publishes persistent
 JSON to RabbitMQ, waits for broker confirms, then records `PUBLISHED`. A publish
 failure returns the row to `PENDING` with bounded backoff. Expired locks can be
-claimed by another relay process.
+claimed by another relay process. There is no terminal publish-failure state:
+`publish_attempts` has no ceiling, so rows that can never publish keep retrying
+at the five-minute backoff cap.
 
 Retry dispatch rows are written transactionally by the worker after handler
 failures and by the lease watcher after expired worker leases. The relay uses

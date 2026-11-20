@@ -58,9 +58,10 @@ directly to the new `sql.Tx`. Worker claims and watcher recovery use
 ## Job-update transaction
 
 Updates also bind queries with `WithTx` and lock the job with `GetJobForUpdate`.
-`JobHasBusyRun` blocks `RUNNING` and `CANCEL_REQUESTED` executions **while the row’s
-`lease_expires_at` is NULL or still in the future**. An expired lease is treated as
-not busy so operators can recover stuck work; workers set `lease_expires_at`
+`JobHasBusyRun` blocks `RUNNING` and `CANCEL_REQUESTED` executions **only while the
+row’s `lease_expires_at` is still in the future**. A missing or expired lease is
+treated as not busy so operators can recover stuck work. Claim, watcher recovery,
+and this check share that rule; workers set `lease_expires_at`
 when claiming (see `ClaimRunToRunning`). An expired `RUNNING` lease can be
 reclaimed with a new fencing token when a worker is already handling a delivery,
 or proactively moved to retry/dead-letter by `cmd/watcher`. Validation,

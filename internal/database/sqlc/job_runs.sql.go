@@ -90,7 +90,7 @@ WHERE id = $1
   AND job_id = $2
   AND attempt_count < max_attempts
   AND ((status IN ('QUEUED', 'RETRY_WAIT') AND (status <> 'RETRY_WAIT' OR retry_at <= NOW()))
-       OR (status = 'RUNNING' AND (lease_expires_at IS NULL OR lease_expires_at < NOW())))
+       OR (status = 'RUNNING' AND (lease_expires_at IS NULL OR lease_expires_at <= NOW())))
   AND (status <> 'RETRY_WAIT' OR retry_at <= NOW())
 RETURNING id, job_id, retry_of_run_id, scheduled_for, trigger_source, trigger_idempotency_key, trigger_request_hash, event_type_snapshot, payload_snapshot, timeout_seconds, status, attempt_count, max_attempts, worker_id, fencing_token, lease_expires_at, heartbeat_at, retry_at, deadline_at, started_at, last_attempt_started_at, finished_at, cancel_requested_at, cancelled_at, cancel_reason, last_error, exit_code, result, created_at, updated_at, retry_delay_seconds
 `
@@ -103,6 +103,7 @@ type ClaimRunToRunningParams struct {
 }
 
 // Worker claim: must run after locking the job row (same transaction as GetJobForRunUpdate).
+// A missing or elapsed lease is expired; keep the inclusive boundary aligned with watcher recovery.
 func (q *Queries) ClaimRunToRunning(ctx context.Context, arg ClaimRunToRunningParams) (JobRun, error) {
 	row := q.db.QueryRowContext(ctx, claimRunToRunning,
 		arg.ID,
@@ -151,7 +152,7 @@ const completeExpiredRunCancelled = `-- name: CompleteExpiredRunCancelled :execr
 UPDATE job_runs SET status = 'CANCELLED', finished_at = NOW(), cancelled_at = NOW(),
     lease_expires_at = NULL, worker_id = NULL
 WHERE id = $1 AND status = 'CANCEL_REQUESTED'
-  AND (lease_expires_at IS NULL OR lease_expires_at < NOW())
+  AND (lease_expires_at IS NULL OR lease_expires_at <= NOW())
 `
 
 func (q *Queries) CompleteExpiredRunCancelled(ctx context.Context, id uuid.UUID) (int64, error) {
@@ -177,36 +178,6 @@ type CompleteRunCancelledParams struct {
 
 func (q *Queries) CompleteRunCancelled(ctx context.Context, arg CompleteRunCancelledParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, completeRunCancelled, arg.ID, arg.WorkerID, arg.FencingToken)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
-}
-
-const completeRunFailed = `-- name: CompleteRunFailed :execrows
-UPDATE job_runs SET status = 'FAILED', last_error = $1,
-    exit_code = $2, finished_at = NOW(), lease_expires_at = NULL,
-    worker_id = NULL
-WHERE id = $3 AND status = 'RUNNING'
-  AND worker_id = $4 AND fencing_token = $5
-`
-
-type CompleteRunFailedParams struct {
-	LastError    sql.NullString
-	ExitCode     sql.NullInt32
-	ID           uuid.UUID
-	WorkerID     sql.NullString
-	FencingToken int64
-}
-
-func (q *Queries) CompleteRunFailed(ctx context.Context, arg CompleteRunFailedParams) (int64, error) {
-	result, err := q.db.ExecContext(ctx, completeRunFailed,
-		arg.LastError,
-		arg.ExitCode,
-		arg.ID,
-		arg.WorkerID,
-		arg.FencingToken,
-	)
 	if err != nil {
 		return 0, err
 	}

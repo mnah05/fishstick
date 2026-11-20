@@ -87,7 +87,7 @@ func TestSQLRunStatusesMatchRegistryAndHaveWriters(t *testing.T) {
 		runstatus.RetryWait:       {"ScheduleRunRetry"},
 		runstatus.CancelRequested: {"CancelRun"},
 		runstatus.Succeeded:       {"CompleteRunSucceeded"},
-		runstatus.Failed:          {"CompleteRunFailed", "FailRunPermanent"},
+		runstatus.Failed:          {"FailRunPermanent"},
 		runstatus.Cancelled:       {"CancelRun", "CompleteRunCancelled"},
 	}
 	for status, names := range writers {
@@ -119,11 +119,6 @@ func TestRunStatusPredicates(t *testing.T) {
 	for _, status := range []string{runstatus.Succeeded, runstatus.Failed, runstatus.Cancelled} {
 		if !runstatus.Terminal(status) {
 			t.Errorf("Terminal(%q)=false", status)
-		}
-	}
-	for _, status := range []string{runstatus.Queued, runstatus.RetryWait, runstatus.Running} {
-		if !runstatus.Claimable(status) {
-			t.Errorf("Claimable(%q)=false", status)
 		}
 	}
 }

@@ -20,17 +20,14 @@ FROM jobs
 WHERE create_idempotency_key = $1;
 
 -- name: JobHasBusyRun :one
--- RUNNING/CANCEL_REQUESTED block updates only while the lease is active (or unset).
--- Expired leases allow edits; workers must set lease_expires_at when claiming.
+-- RUNNING/CANCEL_REQUESTED block updates only while their lease is unexpired.
+-- A missing lease counts as expired, matching claim and watcher recovery.
 SELECT EXISTS (
     SELECT 1
     FROM job_runs
     WHERE job_id = $1
       AND status IN ('RUNNING', 'CANCEL_REQUESTED')
-      AND (
-        lease_expires_at IS NULL
-        OR lease_expires_at > CURRENT_TIMESTAMP
-      )
+      AND lease_expires_at > CURRENT_TIMESTAMP
 )::boolean AS busy;
 
 -- name: ListJobsPage :many

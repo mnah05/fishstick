@@ -91,6 +91,7 @@ WHERE job_id = $1 AND trigger_idempotency_key = $2
 
 -- name: ClaimRunToRunning :one
 -- Worker claim: must run after locking the job row (same transaction as GetJobForRunUpdate).
+-- A missing or elapsed lease is expired; keep the inclusive boundary aligned with watcher recovery.
 UPDATE job_runs
 SET
     status = 'RUNNING',
@@ -106,7 +107,7 @@ WHERE id = $1
   AND job_id = $2
   AND attempt_count < max_attempts
   AND ((status IN ('QUEUED', 'RETRY_WAIT') AND (status <> 'RETRY_WAIT' OR retry_at <= NOW()))
-       OR (status = 'RUNNING' AND (lease_expires_at IS NULL OR lease_expires_at < NOW())))
+       OR (status = 'RUNNING' AND (lease_expires_at IS NULL OR lease_expires_at <= NOW())))
   AND (status <> 'RETRY_WAIT' OR retry_at <= NOW())
 RETURNING *;
 
@@ -118,13 +119,6 @@ WHERE id = sqlc.arg('id') AND status IN ('RUNNING', 'CANCEL_REQUESTED')
 -- name: CompleteRunSucceeded :execrows
 UPDATE job_runs SET status = 'SUCCEEDED', result = sqlc.narg('result')::jsonb,
     finished_at = NOW(), lease_expires_at = NULL, worker_id = NULL
-WHERE id = sqlc.arg('id') AND status = 'RUNNING'
-  AND worker_id = sqlc.arg('worker_id') AND fencing_token = sqlc.arg('fencing_token');
-
--- name: CompleteRunFailed :execrows
-UPDATE job_runs SET status = 'FAILED', last_error = sqlc.arg('last_error'),
-    exit_code = sqlc.narg('exit_code'), finished_at = NOW(), lease_expires_at = NULL,
-    worker_id = NULL
 WHERE id = sqlc.arg('id') AND status = 'RUNNING'
   AND worker_id = sqlc.arg('worker_id') AND fencing_token = sqlc.arg('fencing_token');
 
@@ -153,7 +147,7 @@ WHERE id = sqlc.arg('id') AND status = 'CANCEL_REQUESTED'
 UPDATE job_runs SET status = 'CANCELLED', finished_at = NOW(), cancelled_at = NOW(),
     lease_expires_at = NULL, worker_id = NULL
 WHERE id = sqlc.arg('id') AND status = 'CANCEL_REQUESTED'
-  AND (lease_expires_at IS NULL OR lease_expires_at < NOW());
+  AND (lease_expires_at IS NULL OR lease_expires_at <= NOW());
 
 -- name: GetJobRunByIDForUpdate :one
 SELECT * FROM job_runs WHERE id = $1 FOR UPDATE;

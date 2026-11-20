@@ -112,15 +112,12 @@ SELECT EXISTS (
     FROM job_runs
     WHERE job_id = $1
       AND status IN ('RUNNING', 'CANCEL_REQUESTED')
-      AND (
-        lease_expires_at IS NULL
-        OR lease_expires_at > CURRENT_TIMESTAMP
-      )
+      AND lease_expires_at > CURRENT_TIMESTAMP
 )::boolean AS busy
 `
 
-// RUNNING/CANCEL_REQUESTED block updates only while the lease is active (or unset).
-// Expired leases allow edits; workers must set lease_expires_at when claiming.
+// RUNNING/CANCEL_REQUESTED block updates only while their lease is unexpired.
+// A missing lease counts as expired, matching claim and watcher recovery.
 func (q *Queries) JobHasBusyRun(ctx context.Context, jobID uuid.UUID) (bool, error) {
 	row := q.db.QueryRowContext(ctx, jobHasBusyRun, jobID)
 	var busy bool

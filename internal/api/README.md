@@ -130,14 +130,13 @@ row read all use transaction-bound queries. The handler commits before returning
 success; any failure rolls back the transaction.
 
 Only `RUNNING` and `CANCEL_REQUESTED` runs block updates with `409 JOB_BUSY`, and
-only while the run’s `lease_expires_at` is **NULL** (legacy or unset) or **after**
-`CURRENT_TIMESTAMP`. If a worker wrote a lease and it has expired, the run no
-longer counts as busy and updates may proceed (so stuck claims do not block edits
-forever). Queued, retry-waiting, and terminal runs allow changes while keeping
-their existing snapshots. Concurrent partial updates read the latest committed
-job after acquiring its lock, preventing one update from overwriting an unrelated
-field changed by another. Triggers use the same lock, so a new run snapshots one
-consistent job version.
+only while the run's `lease_expires_at` is after `CURRENT_TIMESTAMP`. A missing
+or expired lease does not count as busy, so legacy rows and stuck claims do not
+block edits forever. Queued, retry-waiting, and terminal runs allow changes while
+keeping their existing snapshots. Concurrent partial updates read the latest committed
+job after acquiring its lock, preventing one update from overwriting an
+unrelated field changed by another. Triggers use the same lock, so a new run
+snapshots one consistent job version.
 
 Worker-style claims use **`ClaimRunToRunning`** in the same transaction as
 `GetJobForRunUpdate`: set the lease and worker owner, then lock the run. The
@@ -178,9 +177,10 @@ meaning of an already-used key. Replay returns the stored run's current state.
 Run JSON includes IDs, status, attempts, execution snapshots as `event_type` and
 `payload`, timeout, worker information, timestamps, errors, and result. Nullable
 fields become JSON null. Internal idempotency fields and the fencing token are
-not exposed. `202` means the run and event are persisted, not that execution has
-started. The relay publishes the event; the worker then claims and executes the
-snapshot.
+not exposed. `deadline_at`, `exit_code`, and `retry_of_run_id` are reserved:
+current transitions never write them, so they return null. `202` means the run
+and event are persisted, not that execution has started. The relay publishes
+the event; the worker then claims and executes the snapshot.
 
 ## Health and errors
 

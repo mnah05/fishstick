@@ -79,7 +79,7 @@ func processBatch(ctx context.Context, db *sql.DB, publisher Publisher, workerID
 }
 
 func backoff(attempts int32) time.Duration {
-	d := time.Second << min(attempts, 8)
+	d := time.Second << min(attempts, 9)
 	if d > 5*time.Minute {
 		return 5 * time.Minute
 	}

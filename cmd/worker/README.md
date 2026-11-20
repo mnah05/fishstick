@@ -7,7 +7,9 @@ path recommended in `PLAN.md`; it does not poll queued rows directly.
 Claiming locks the job before the run, increments the fencing token and attempt
 count, and assigns a lease. Heartbeats renew the lease and observe cancellation.
 Redelivered messages wait for an active lease to expire before reclaiming the
-run. The separate `cmd/watcher` process proactively recovers expired leases:
+run. The worker also fails an expired final attempt when its delivery returns,
+instead of waiting for the watcher. The separate `cmd/watcher` process
+proactively recovers expired leases:
 attempts remaining schedule a delayed outbox dispatch from the run snapshot;
 exhausted attempts create an `OPEN` DLQ row. Both paths clear the old worker and
 lease, and stale handlers cannot complete after the state transition.

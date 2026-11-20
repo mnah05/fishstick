@@ -91,7 +91,7 @@ writer.
 | `QUEUED`, due `RETRY_WAIT` | `RUNNING` | `cmd/worker`, after locking the job row |
 | expired `RUNNING` | `RUNNING` with a new fencing token | `cmd/worker` when a dispatch is already being handled |
 | expired `RUNNING` below max attempts | `RETRY_WAIT` + delayed dispatch | `cmd/watcher`, same transaction |
-| expired `RUNNING` at max attempts | `FAILED` + `OPEN` DLQ entry | `cmd/watcher`, same transaction |
+| expired `RUNNING` at max attempts | `FAILED` + `OPEN` DLQ entry | `cmd/watcher`, or `cmd/worker` when the final delivery returns, same transaction |
 | `QUEUED`, `RETRY_WAIT` | `CANCELLED` | `cmd/api` cancel endpoint |
 | `RUNNING` | `CANCEL_REQUESTED` | Implemented by cancel API |
 | `RUNNING` | `SUCCEEDED`, `FAILED`, `RETRY_WAIT` | `cmd/worker` completion queries |
@@ -104,8 +104,15 @@ writer.
 `CANCEL_REQUESTED` is idempotent. Cancelling a terminal run returns conflict.
 The API classification lives in `internal/api/status.go`; `CancelRun` in
 `internal/database/sqlc/queries/job_runs.sql` applies the corresponding update
-to pre-run and `RUNNING` states. Worker completions require the current worker
+to pre-run and `RUNNING` states. A drift test keeps that map and the
+`CancelRun` guard in sync. Worker completions require the current worker
 ID and fencing token, so stale workers cannot overwrite a later claim.
+
+A `QUEUED` or `RETRY_WAIT` run advances only when a dispatch message reaches
+the worker. The worker drops an undecodable message without changing run state,
+and no process sweeps stale `QUEUED` or `RETRY_WAIT` rows. A lost or corrupt
+dispatch therefore has no in-repo recovery owner; operators must re-trigger or
+inspect the outbox.
 
 ### Lease watcher
 
@@ -125,14 +132,28 @@ ensure a heartbeat, completion, or competing watcher that wins the row lock
 prevents duplicate recovery. A stale handler cannot complete because its run
 has left `RUNNING`; a subsequent claim also advances the fencing token.
 
+### Reserved and observational columns
+
+These run columns are not part of a live transition:
+
+| Column | Current use |
+| --- | --- |
+| `deadline_at` | No writer. Execution timeout comes from `timeout_seconds`; the API returns `deadline_at` as null. |
+| `heartbeat_at` | Written on claim and each heartbeat and exposed by the API, but not read by any liveness decision. Leases decide liveness. |
+| `exit_code` | No writer. Failure paths record `last_error`; success records `result`. |
+| `retry_of_run_id` | No writer. Run-level retry linkage is deferred. |
+| `dead_letter_jobs.retry_run_id`, `resolved_at` | No writer. Manual DLQ resolution is deferred. |
+
 ## Job update versus run claim
 
 This is a coordination gate rather than a job status. Both job update and the
-documented worker claim protocol lock the same job row. After that lock, an
-update returns `JOB_BUSY` when a `RUNNING` or `CANCEL_REQUESTED` run has no
-lease expiry or an unexpired lease; otherwise it may save the job definition.
-The claim query must keep the lock through its run status change. This serializes
-job snapshots and edits. The worker uses this protocol before claiming.
+documented worker claim protocol lock the same job row. A lease is active only
+when `lease_expires_at > now()`; a missing or past lease is expired. After that
+lock, an update returns `JOB_BUSY` when a `RUNNING` or `CANCEL_REQUESTED` run
+has an active lease; otherwise it may save the job definition. The claim query
+must keep the lock through its run status change. This serializes job snapshots
+and edits. The worker uses this protocol before claiming. Claim, watcher
+recovery, and this busy check share the same lease rule.
 
 ## Outbox delivery
 
@@ -147,6 +168,11 @@ PENDING -> INFLIGHT -> PUBLISHED
               +-> PENDING (publish failure, with backoff)
 INFLIGHT (expired lock) -> INFLIGHT (reclaimed by another relay)
 ```
+
+`PUBLISHED` is terminal. There is no terminal failure state: `publish_attempts`
+has no ceiling, so a row that can never publish retries indefinitely at the
+five-minute backoff cap and has no dead-letter equivalent. Operators diagnose
+it through `last_error`.
 
 
 ## Dead-letter resolution

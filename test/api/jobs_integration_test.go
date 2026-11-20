@@ -135,7 +135,7 @@ func TestUpdateJobStatesPostgresIntegration(t *testing.T) {
 			id := insertTestJob(t, db)
 			if status != "" {
 				runID := insertTestRun(t, db, id, status)
-				// Busy check only treats RUNNING/CANCEL_REQUESTED as blocking while lease is active or unset.
+				// Busy check treats RUNNING/CANCEL_REQUESTED as blocking only while the lease is active.
 				if status == "RUNNING" || status == "CANCEL_REQUESTED" {
 					setRunLease(t, db, runID, time.Now().Add(time.Hour))
 				}
@@ -403,6 +403,29 @@ func TestUpdateAllowedWhenRunLeaseExpiredPostgresIntegration(t *testing.T) {
 	}
 	if job.Name != "after expired lease" {
 		t.Fatalf("update not applied: %+v", job)
+	}
+}
+
+func TestUpdateAllowedWhenRunLeaseMissingPostgresIntegration(t *testing.T) {
+	for _, status := range []string{"RUNNING", "CANCEL_REQUESTED"} {
+		t.Run(status, func(t *testing.T) {
+			db := newIntegrationDB(t)
+			router := api.NewTestRouter(db)
+			id := insertTestJob(t, db)
+			// A missing lease is expired for claim, watcher recovery, and the busy check.
+			insertTestRun(t, db, id, status)
+			rec := jobRequest(router, "POST", "/v1/job/update/"+id.String(), `{"name":"after missing lease"}`)
+			if rec.Code != 200 {
+				t.Fatalf("want 200, got %d %s", rec.Code, rec.Body.String())
+			}
+			job, err := sqlc.New(db).GetJob(context.Background(), id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if job.Name != "after missing lease" {
+				t.Fatalf("update not applied: %+v", job)
+			}
+		})
 	}
 }
 

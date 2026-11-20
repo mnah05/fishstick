@@ -13,3 +13,9 @@
   failed and recorded in the DLQ atomically.
 - Added a retry-delay snapshot to runs so retries use the job settings captured
   when the run was created.
+- Fixed the relay backoff to reach its documented five-minute maximum.
+- **Behavior change:** `JOB_BUSY` now requires an unexpired run lease. A
+  `RUNNING` or `CANCEL_REQUESTED` run with a missing lease no longer blocks job
+  updates, matching the claim and watcher recovery rule. `deadline_at`,
+  `exit_code`, and `retry_of_run_id` are documented as reserved run fields with
+  no current writer.

@@ -2,7 +2,7 @@
 
 The worker consumes `JOB_DISPATCH` JSON containing a `run_id`; it then reads the
 run and immutable event snapshot from PostgreSQL. This uses the RabbitMQ intake
-path recommended in `PLAN.md`; it does not poll queued rows directly.
+path; it does not poll queued rows directly.
 
 Claiming locks the job before the run, increments the fencing token and attempt
 count, and assigns a lease. Heartbeats renew the lease and observe cancellation.
